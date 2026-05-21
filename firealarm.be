@@ -1,5 +1,5 @@
 # Multi Fire Alarm Zigbee Sensor - Tasmota Berry Script
-# Save as firealarm.be and load with: load("firealarm.be")
+# Save as fa.be and load with: load("fa.be")
 #
 # CONFIGURATION: Add one entry per sensor. Index 1 = top row, index 2 = next, etc.
 # The "name" must match the "Name" field in ZbReceived JSON.
