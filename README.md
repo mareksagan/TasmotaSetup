@@ -18,3 +18,9 @@ TelePeriod 10
 PowerDelta 0
 Restart 1
 ```
+
+# Light theme for Tasmota
+
+```
+WebColor {"WebColor":["#000000","#ffffff","#f2f2f2","#000000","#ffffff","#000000","#ffffff","#ff0000","#008000","#ffffff","#1fa3ec","#0e70a4","#d43535","#931f1f","#47c266","#5aaf6f","#ffffff","#999999","#000000","#a1d9f7"]}
+```
