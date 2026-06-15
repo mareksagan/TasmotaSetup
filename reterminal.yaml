@@ -1,0 +1,1776 @@
+esphome:
+  name: reterminal-clock
+  friendly_name: "reTerminal Clock"
+  on_boot:
+    - priority: 600
+      then:
+        - lambda: |-
+            id(boot_count)++;
+            ESP_LOGI("main", "========================================");
+            ESP_LOGI("main", "BOOT #%d  reset_reason=%d", id(boot_count), esp_reset_reason());
+            ESP_LOGI("main", "City=%s  cached_hash=%u  lat=%.4f  lon=%.4f", id(city_select).current_option().c_str(), id(cached_city_hash), id(city_lat_f), id(city_lon_f));
+            ESP_LOGI("main", "========================================");
+        - output.turn_on: bsp_battery_enable
+        - delay: 500ms
+        - component.update: sht40
+        - component.update: battery_voltage
+    - priority: -100
+      then:
+        - logger.log: "Boot complete, waiting for WiFi..."
+        - lambda: |-
+            if (!id(wifi_component).has_sta()) {
+              ESP_LOGI("wifi", "No STA config found, preventing deep sleep for provisioning");
+              id(deep_sleep_1).prevent_deep_sleep();
+            }
+            if (!id(deep_sleep_enabled).state) {
+              ESP_LOGI("sleep", "Deep sleep switch is OFF, preventing sleep");
+              id(deep_sleep_1).prevent_deep_sleep();
+            }
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+api:
+
+logger:
+  level: INFO
+  baud_rate: 0
+
+wifi:
+  id: wifi_component
+  on_connect:
+    then:
+      - logger.log: "WiFi connected, fetching data..."
+      - lambda: |-
+          id(data_ready_weather) = false;
+          id(data_ready_aq) = false;
+          id(display_updated) = false;
+          ESP_LOGI("main", "Flags reset for new cycle");
+      - script.execute: geocode_city
+  ap:
+    ssid: "reTerminal Clock"
+
+captive_portal:
+
+esp32_improv:
+  authorizer: none
+
+web_server:
+  port: 80
+
+ota:
+  - platform: esphome
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "CET-1CEST,M3.5.0,M10.5.0/3"
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
+    update_interval: 6h
+    on_time_sync:
+      then:
+        - logger.log: "SNTP time synchronized"
+
+i2c:
+  sda: GPIO19
+  scl: GPIO20
+  scan: false
+
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO9
+
+http_request:
+  verify_ssl: false
+  timeout: 15s
+  watchdog_timeout: 20s
+
+globals:
+  - id: data_ready_weather
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: data_ready_aq
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: display_updated
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: sunrise_time
+    type: std::string
+    restore_value: no
+    initial_value: '"--:--"'
+  - id: sunset_time
+    type: std::string
+    restore_value: no
+    initial_value: '"--:--"'
+  - id: weather_text
+    type: std::string
+    restore_value: no
+    initial_value: '"Loading..."'
+  - id: city_lat_f
+    type: float
+    restore_value: yes
+    initial_value: "0.0"
+  - id: city_lon_f
+    type: float
+    restore_value: yes
+    initial_value: "0.0"
+  - id: cached_city_hash
+    type: uint32_t
+    restore_value: yes
+    initial_value: "0"
+  - id: boot_count
+    type: int
+    restore_value: yes
+    initial_value: "0"
+  - id: current_screen
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: btn_left_pressed
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: btn_right_pressed
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: btn_combo_timer
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: alarm_hour
+    type: int
+    restore_value: yes
+    initial_value: "7"
+  - id: alarm_minute
+    type: int
+    restore_value: yes
+    initial_value: "0"
+  - id: alarm_enabled
+    type: bool
+    restore_value: yes
+    initial_value: "false"
+  - id: alarm_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: alarm_buzzer_on
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: alarm_edit_mode
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: alarm_edit_field
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: green_press_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: last_nav_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+output:
+  - platform: gpio
+    pin: GPIO21
+    id: bsp_battery_enable
+
+  - platform: gpio
+    pin: GPIO6
+    id: led_output
+    inverted: true
+
+  - platform: ledc
+    pin:
+      number: GPIO45
+      ignore_strapping_warning: true
+    id: buzzer_pwm
+    frequency: 1000Hz
+
+light:
+  - platform: binary
+    name: "Status LED"
+    output: led_output
+    id: onboard_led
+
+  - platform: monochromatic
+    name: "Buzzer"
+    output: buzzer_pwm
+    id: buzzer
+    default_transition_length: 0s
+
+button:
+  - platform: restart
+    id: reboot_device
+    name: "Reboot"
+
+switch:
+  - platform: template
+    name: "Deep Sleep"
+    id: deep_sleep_enabled
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:sleep"
+    turn_on_action:
+      - lambda: |-
+          ESP_LOGI("sleep", "Deep sleep enabled via switch");
+    turn_off_action:
+      - lambda: |-
+          ESP_LOGI("sleep", "Deep sleep disabled via switch, preventing sleep");
+          id(deep_sleep_1).prevent_deep_sleep();
+
+  - platform: template
+    name: "Alarm"
+    id: alarm_enabled_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:alarm"
+    turn_on_action:
+      - lambda: |-
+          id(alarm_enabled) = true;
+          ESP_LOGI("alarm", "Alarm enabled");
+    turn_off_action:
+      - lambda: |-
+          id(alarm_enabled) = false;
+          id(alarm_active) = false;
+          id(buzzer)->turn_off().perform();
+          ESP_LOGI("alarm", "Alarm disabled");
+
+select:
+  - platform: template
+    name: "City"
+    id: city_select
+    optimistic: true
+    restore_value: true
+    initial_option: "Warsaw"
+    options:
+      - "Abu Dhabi"
+      - "Abuja"
+      - "Accra"
+      - "Adana"
+      - "Addis Ababa"
+      - "Adelaide"
+      - "Ahmedabad"
+      - "Alexandria"
+      - "Algiers"
+      - "Almaty"
+      - "Amman"
+      - "Amsterdam"
+      - "Anchorage"
+      - "Andorra la Vella"
+      - "Ankara"
+      - "Antalya"
+      - "Antananarivo"
+      - "Antofagasta"
+      - "Asuncion"
+      - "Athens"
+      - "Atlanta"
+      - "Auckland"
+      - "Baghdad"
+      - "Baku"
+      - "Baltimore"
+      - "Bamako"
+      - "Bandung"
+      - "Bangalore"
+      - "Bangkok"
+      - "Banjul"
+      - "Barcelona"
+      - "Barquisimeto"
+      - "Barranquilla"
+      - "Basra"
+      - "Beirut"
+      - "Belfast"
+      - "Belgrade"
+      - "Belo Horizonte"
+      - "Berlin"
+      - "Bern"
+      - "Bishkek"
+      - "Birmingham"
+      - "Bissau"
+      - "Bogota"
+      - "Bologna"
+      - "Boston"
+      - "Brasilia"
+      - "Bratislava"
+      - "Brisbane"
+      - "Bristol"
+      - "Brussels"
+      - "Bucharest"
+      - "Budapest"
+      - "Buenos Aires"
+      - "Bujumbura"
+      - "Busan"
+      - "Cairo"
+      - "Calgary"
+      - "Cali"
+      - "Canberra"
+      - "Cancun"
+      - "Cape Town"
+      - "Caracas"
+      - "Cardiff"
+      - "Casablanca"
+      - "Cebu"
+      - "Chandigarh"
+      - "Chiang Mai"
+      - "Chicago"
+      - "Chisinau"
+      - "Christchurch"
+      - "Cincinnati"
+      - "Cleveland"
+      - "Cologne"
+      - "Colombo"
+      - "Conakry"
+      - "Concepcion"
+      - "Copenhagen"
+      - "Cordoba"
+      - "Cork"
+      - "Curitiba"
+      - "Daegu"
+      - "Dakar"
+      - "Dallas"
+      - "Damascus"
+      - "Dar es Salaam"
+      - "Darwin"
+      - "Davao"
+      - "Delhi"
+      - "Denver"
+      - "Des Moines"
+      - "Detroit"
+      - "Dhaka"
+      - "Doha"
+      - "Dresden"
+      - "Dubai"
+      - "Dublin"
+      - "Dusseldorf"
+      - "Edmonton"
+      - "Edinburgh"
+      - "Erbil"
+      - "Faro"
+      - "Fortaleza"
+      - "Frankfurt"
+      - "Freetown"
+      - "Fukuoka"
+      - "Gaborone"
+      - "Gaziantep"
+      - "Geneva"
+      - "Georgetown"
+      - "George Town"
+      - "Giza"
+      - "Glasgow"
+      - "Gothenburg"
+      - "Graz"
+      - "Guadalajara"
+      - "Guangzhou"
+      - "Guatemala City"
+      - "Guayaquil"
+      - "Hamburg"
+      - "Hamilton"
+      - "Hanoi"
+      - "Harare"
+      - "Havana"
+      - "Helsinki"
+      - "Ho Chi Minh City"
+      - "Hobart"
+      - "Hong Kong"
+      - "Houston"
+      - "Hyderabad"
+      - "Iasi"
+      - "Ibadan"
+      - "Innsbruck"
+      - "Incheon"
+      - "Indianapolis"
+      - "Islamabad"
+      - "Istanbul"
+      - "Izmir"
+      - "Jaipur"
+      - "Jakarta"
+      - "Jeddah"
+      - "Jerusalem"
+      - "Johannesburg"
+      - "Kano"
+      - "Kanpur"
+      - "Kaohsiung"
+      - "Karachi"
+      - "Kathmandu"
+      - "Kazan"
+      - "Khartoum"
+      - "Kiev"
+      - "Kigali"
+      - "Kingston"
+      - "Kinshasa"
+      - "Kochi"
+      - "Kolkata"
+      - "Kota Kinabalu"
+      - "Krakow"
+      - "Kuala Lumpur"
+      - "Kuching"
+      - "Kuwait City"
+      - "Kyoto"
+      - "Lagos"
+      - "Lahore"
+      - "La Paz"
+      - "Las Vegas"
+      - "Leeds"
+      - "Leipzig"
+      - "Leon"
+      - "Lima"
+      - "Lisbon"
+      - "Liverpool"
+      - "Ljubljana"
+      - "London"
+      - "Los Angeles"
+      - "Louisville"
+      - "Luanda"
+      - "Lucknow"
+      - "Luxembourg"
+      - "Lyon"
+      - "Macau"
+      - "Madrid"
+      - "Malaga"
+      - "Malmo"
+      - "Managua"
+      - "Manchester"
+      - "Manila"
+      - "Maputo"
+      - "Marrakesh"
+      - "Marseille"
+      - "Mashhad"
+      - "Maseru"
+      - "Mazatlan"
+      - "Medan"
+      - "Medellin"
+      - "Melbourne"
+      - "Memphis"
+      - "Merida"
+      - "Mexico City"
+      - "Miami"
+      - "Milan"
+      - "Milwaukee"
+      - "Minneapolis"
+      - "Minsk"
+      - "Mogadishu"
+      - "Mombasa"
+      - "Monrovia"
+      - "Montevideo"
+      - "Montreal"
+      - "Moscow"
+      - "Mosul"
+      - "Mumbai"
+      - "Munich"
+      - "Muscat"
+      - "Nagoya"
+      - "Nairobi"
+      - "Naples"
+      - "Nashik"
+      - "Nassau"
+      - "Naypyidaw"
+      - "Newcastle"
+      - "New Orleans"
+      - "New York"
+      - "Nicosia"
+      - "Niamey"
+      - "Nice"
+      - "Nizhny Novgorod"
+      - "Noida"
+      - "Nouakchott"
+      - "Novosibirsk"
+      - "Nuremberg"
+      - "Nur-Sultan"
+      - "Odessa"
+      - "Oklahoma City"
+      - "Omaha"
+      - "Oran"
+      - "Osaka"
+      - "Oslo"
+      - "Ottawa"
+      - "Ouagadougou"
+      - "Padua"
+      - "Palermo"
+      - "Panama City"
+      - "Paris"
+      - "Patna"
+      - "Pekanbaru"
+      - "Perth"
+      - "Philadelphia"
+      - "Phnom Penh"
+      - "Phoenix"
+      - "Pittsburgh"
+      - "Podgorica"
+      - "Port Elizabeth"
+      - "Port Harcourt"
+      - "Port Louis"
+      - "Port Moresby"
+      - "Port of Spain"
+      - "Porto"
+      - "Porto Alegre"
+      - "Portsmouth"
+      - "Poznan"
+      - "Prague"
+      - "Praia"
+      - "Pretoria"
+      - "Pristina"
+      - "Pune"
+      - "Pyongyang"
+      - "Quebec City"
+      - "Quito"
+      - "Rabat"
+      - "Raleigh"
+      - "Rawalpindi"
+      - "Recife"
+      - "Reykjavik"
+      - "Riga"
+      - "Rio de Janeiro"
+      - "Riyadh"
+      - "Rome"
+      - "Rosario"
+      - "Rostov-on-Don"
+      - "Rotterdam"
+      - "Saint Petersburg"
+      - "Salt Lake City"
+      - "Salvador"
+      - "Samara"
+      - "Samarkand"
+      - "San Antonio"
+      - "San Diego"
+      - "San Francisco"
+      - "San Jose"
+      - "San Juan"
+      - "San Salvador"
+      - "Santiago"
+      - "Santo Domingo"
+      - "Sao Paulo"
+      - "Sapporo"
+      - "Sarajevo"
+      - "Seattle"
+      - "Semarang"
+      - "Seoul"
+      - "Seville"
+      - "Shanghai"
+      - "Sharjah"
+      - "Sheffield"
+      - "Shenzhen"
+      - "Shiraz"
+      - "Shymkent"
+      - "Singapore"
+      - "Skopje"
+      - "Sofia"
+      - "Soweto"
+      - "Split"
+      - "St Louis"
+      - "Stockholm"
+      - "Strasbourg"
+      - "Stuttgart"
+      - "Surabaya"
+      - "Surat"
+      - "Suva"
+      - "Sydney"
+      - "Tabriz"
+      - "Taichung"
+      - "Tainan"
+      - "Taipei"
+      - "Tallinn"
+      - "Tampere"
+      - "Tanger"
+      - "Tashkent"
+      - "Tbilisi"
+      - "Tehran"
+      - "Tel Aviv"
+      - "Thessaloniki"
+      - "Thimphu"
+      - "Tianjin"
+      - "Timisoara"
+      - "Tirana"
+      - "Tokyo"
+      - "Toluca"
+      - "Toronto"
+      - "Toulouse"
+      - "Tripoli"
+      - "Trujillo"
+      - "Tunis"
+      - "Turin"
+      - "Turku"
+      - "Ufa"
+      - "Ulaanbaatar"
+      - "Ulsan"
+      - "Urumqi"
+      - "Vaduz"
+      - "Valencia"
+      - "Valletta"
+      - "Valparaiso"
+      - "Vancouver"
+      - "Varanasi"
+      - "Varna"
+      - "Vatican City"
+      - "Venice"
+      - "Verona"
+      - "Victoria"
+      - "Vienna"
+      - "Vientiane"
+      - "Vilnius"
+      - "Vladivostok"
+      - "Volgograd"
+      - "Voronezh"
+      - "Warsaw"
+      - "Washington DC"
+      - "Wellington"
+      - "Windhoek"
+      - "Winnipeg"
+      - "Wollongong"
+      - "Wuhan"
+      - "Wuxi"
+      - "Xi'an"
+      - "Xiamen"
+      - "Yamoussoukro"
+      - "Yangon"
+      - "Yaounde"
+      - "Yekaterinburg"
+      - "Yerevan"
+      - "Yokohama"
+      - "Zagreb"
+      - "Zanzibar City"
+      - "Zaporizhzhia"
+      - "Zhengzhou"
+      - "Zurich"
+    set_action:
+      - lambda: |-
+          ESP_LOGI("city", "City changed to: %s", x.c_str());
+          id(cached_city_hash) = 0;
+          id(city_select).publish_state(x);
+      - delay: 1s
+      - button.press: reboot_device
+
+number:
+  - platform: template
+    name: "Alarm Hour"
+    id: alarm_hour_num
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 7
+    set_action:
+      - lambda: id(alarm_hour) = x;
+  - platform: template
+    name: "Alarm Minute"
+    id: alarm_minute_num
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    set_action:
+      - lambda: id(alarm_minute) = x;
+
+# Deep sleep: wake every 10min or on green button press
+# Comment out the deep_sleep block while developing/flashing OTA
+deep_sleep:
+  id: deep_sleep_1
+  run_duration: 90s
+  sleep_duration: 10min
+
+sensor:
+  - platform: sht4x
+    id: sht40
+    temperature:
+      name: "Indoor Temperature"
+      id: sht4x_temp
+      accuracy_decimals: 1
+    humidity:
+      name: "Indoor Humidity"
+      id: sht4x_hum
+      accuracy_decimals: 1
+    address: 0x44
+    update_interval: never
+
+  - platform: adc
+    pin: GPIO1
+    name: "Battery Voltage"
+    id: battery_voltage
+    attenuation: 12db
+    update_interval: never
+    filters:
+      - multiply: 2.0
+    on_value:
+      then:
+        - component.update: battery_level
+
+  - platform: template
+    name: "Battery Level"
+    id: battery_level
+    unit_of_measurement: "%"
+    device_class: battery
+    update_interval: never
+    lambda: |-
+      if (isnan(id(battery_voltage).state)) return NAN;
+      float v = id(battery_voltage).state;
+      if (v >= 4.15) return 100.0;
+      if (v >= 3.96) return 90.0;
+      if (v >= 3.91) return 80.0;
+      if (v >= 3.85) return 70.0;
+      if (v >= 3.80) return 60.0;
+      if (v >= 3.75) return 50.0;
+      if (v >= 3.68) return 40.0;
+      if (v >= 3.58) return 30.0;
+      if (v >= 3.49) return 20.0;
+      if (v >= 3.41) return 10.0;
+      if (v >= 3.30) return 5.0;
+      return 0.0;
+
+  # Outdoor data from Open-Meteo
+  - platform: template
+    name: "Outdoor Temperature"
+    id: outdoor_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: template
+    name: "Outdoor Humidity"
+    id: outdoor_hum
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "UV Index"
+    id: uv_index
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: template
+    name: "Weather Code"
+    id: weather_code
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "PM2.5"
+    id: pm25
+    unit_of_measurement: "µg/m³"
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "PM10"
+    id: pm10
+    unit_of_measurement: "µg/m³"
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_rssi
+    update_interval: 60s
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      id: device_ip
+    mac_address:
+      name: "MAC Address"
+      id: device_mac
+    ssid:
+      name: "Connected SSID"
+      id: wifi_ssid
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+      inverted: true
+    id: btn_white_right
+    name: "Right White Button"
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      then:
+        - lambda: |-
+            id(btn_right_pressed) = true;
+        - script.execute: btn_feedback
+        - script.execute: btn_right_nav
+    on_release:
+      then:
+        - lambda: |-
+            id(btn_right_pressed) = false;
+            id(btn_combo_timer) = 0;
+
+  - platform: gpio
+    pin:
+      number: GPIO5
+      mode: INPUT_PULLUP
+      inverted: true
+    id: btn_white_left
+    name: "Left White Button"
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      then:
+        - lambda: |-
+            id(btn_left_pressed) = true;
+        - script.execute: btn_feedback
+        - script.execute: btn_left_nav
+    on_release:
+      then:
+        - lambda: |-
+            id(btn_left_pressed) = false;
+            id(btn_combo_timer) = 0;
+
+  - platform: gpio
+    pin:
+      number: GPIO3
+      mode: INPUT_PULLUP
+      inverted: true
+    id: btn_green
+    name: "Green Button"
+    filters:
+      - delayed_on: 50ms
+    on_press:
+      then:
+        - script.execute: btn_feedback
+        - lambda: id(green_press_ms) = millis();
+    on_release:
+      then:
+        - lambda: |-
+            uint32_t press = id(green_press_ms);
+            uint32_t now = millis();
+            id(green_press_ms) = 0;
+            if (press == 0) return;
+            uint32_t duration = now - press;
+            if (duration >= 5000) {
+              // 5s press: toggle alarm on/off
+              id(alarm_enabled) = !id(alarm_enabled);
+              id(alarm_enabled_switch).publish_state(id(alarm_enabled));
+              id(buzzer_pwm).set_level(0.5f);
+              delay(100);
+              id(buzzer_pwm).set_level(0.0f);
+              if (id(alarm_enabled)) {
+                ESP_LOGI("alarm", "Alarm enabled via 5s green press");
+              } else {
+                ESP_LOGI("alarm", "Alarm disabled via 5s green press");
+                id(alarm_active) = false;
+                id(alarm_buzzer_on) = false;
+                id(buzzer)->turn_off().perform();
+              }
+              id(current_screen) = 2;
+              id(last_nav_ms) = millis();
+              id(epaper_display).update();
+              return;
+            }
+            if (duration >= 2000) {
+              // 2-5s press: enter alarm edit mode
+              if (!id(alarm_edit_mode)) {
+                ESP_LOGI("alarm", "Entering edit mode");
+                id(alarm_edit_mode) = true;
+                id(alarm_edit_field) = 0;
+                id(current_screen) = 2;
+                id(last_nav_ms) = millis();
+                id(epaper_display).update();
+              }
+              return;
+            }
+            // Short press
+            if (id(alarm_edit_mode)) {
+              if (id(alarm_edit_field) == 0) {
+                id(alarm_edit_field) = 1;
+                id(epaper_display).update();
+                ESP_LOGI("alarm", "Editing minutes");
+              } else {
+                id(alarm_edit_mode) = false;
+                id(alarm_hour_num).publish_state(id(alarm_hour));
+                id(alarm_minute_num).publish_state(id(alarm_minute));
+                id(alarm_enabled) = true;
+                id(alarm_enabled_switch).publish_state(true);
+                id(epaper_display).update();
+                ESP_LOGI("alarm", "Saved %02d:%02d, alarm enabled", id(alarm_hour), id(alarm_minute));
+              }
+            } else if (id(alarm_active)) {
+              ESP_LOGI("alarm", "Alarm stopped by green button");
+              id(alarm_active) = false;
+              id(alarm_buzzer_on) = false;
+              id(buzzer)->turn_off().perform();
+              id(epaper_display).update();
+            } else {
+              id(data_ready_weather) = false;
+              id(data_ready_aq) = false;
+              id(display_updated) = false;
+              id(geocode_city).execute();
+            }
+
+
+font:
+  - file: "gfonts://Inter@700"
+    id: font_time
+    size: 110
+    glyphs: '0123456789:'
+  - file: "gfonts://Inter@600"
+    id: font_date
+    size: 36
+    glyphs: '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ ,.-/'
+  - file: "gfonts://Inter@500"
+    id: font_info
+    size: 28
+    glyphs: '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ °%.,-:/()+&'
+  - file: "gfonts://Inter@500"
+    id: font_small
+    size: 22
+    glyphs: '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ °%.,-:/()+&'
+
+script:
+  - id: geocode_city
+    mode: single
+    then:
+      - lambda: |-
+          auto city_to_tz = [](const std::string& city) -> const char* {
+            // Central Europe (CET/CEST)
+            if (city == "Warsaw" || city == "Berlin" || city == "Paris" || city == "Rome" || city == "Vienna" || city == "Amsterdam" || city == "Brussels" || city == "Prague" || city == "Budapest" || city == "Madrid" || city == "Stockholm" || city == "Copenhagen" || city == "Oslo" || city == "Zurich" || city == "Milan" || city == "Barcelona" || city == "Belgrade" || city == "Krakow" || city == "Naples" || city == "Munich" || city == "Bologna" || city == "Cologne" || city == "Dresden" || city == "Dusseldorf" || city == "Frankfurt" || city == "Geneva" || city == "Graz" || city == "Gothenburg" || city == "Hamburg" || city == "Innsbruck" || city == "Leipzig" || city == "Ljubljana" || city == "Luxembourg" || city == "Lyon" || city == "Malaga" || city == "Malmo" || city == "Marseille" || city == "Nuremberg" || city == "Nice" || city == "Padua" || city == "Palermo" || city == "Poznan" || city == "Prague" || city == "Pristina" || city == "Rotterdam" || city == "Salzburg" || city == "Sarajevo" || city == "Seville" || city == "Skopje" || city == "Split" || city == "Strasbourg" || city == "Stuttgart" || city == "Toulouse" || city == "Turin" || city == "Valencia" || city == "Vatican City" || city == "Venice" || city == "Verona" || city == "Zagreb" || city == "Andorra la Vella" || city == "Bratislava" || city == "Vaduz" || city == "Valletta" || city == "Tanger" || city == "Marrakesh" || city == "Rabat" || city == "Casablanca" || city == "Tunis" || city == "Faro" || city == "Porto" || city == "Lisbon") return "CET-1CEST,M3.5.0,M10.5.0/3";
+            // Eastern Europe (EET/EEST)
+            if (city == "Athens" || city == "Helsinki" || city == "Tallinn" || city == "Sofia" || city == "Bucharest" || city == "Chisinau" || city == "Iasi" || city == "Kiev" || city == "Odessa" || city == "Riga" || city == "Thessaloniki" || city == "Timisoara" || city == "Varna" || city == "Vilnius" || city == "Zaporizhzhia" || city == "Nicosia") return "EET-2EEST,M3.5.0,M10.5.0/3";
+            // Turkey
+            if (city == "Istanbul" || city == "Ankara" || city == "Adana" || city == "Antalya" || city == "Bursa" || city == "Gaziantep" || city == "Izmir") return "TRT-3";
+            // UK & Ireland
+            if (city == "London" || city == "Dublin" || city == "Edinburgh" || city == "Glasgow" || city == "Belfast" || city == "Birmingham" || city == "Bristol" || city == "Cardiff" || city == "Leeds" || city == "Liverpool" || city == "Manchester" || city == "Newcastle" || city == "Portsmouth" || city == "Sheffield" || city == "Cork") return "GMT0BST,M3.5.0,M10.5.0/1";
+            // Russia (MSK UTC+3)
+            if (city == "Moscow" || city == "Saint Petersburg" || city == "Kazan" || city == "Minsk" || city == "Nizhny Novgorod" || city == "Rostov-on-Don" || city == "Ufa" || city == "Volgograd" || city == "Voronezh") return "MSK-3";
+            // Russia (other zones)
+            if (city == "Novosibirsk") return "NOVT-7";
+            if (city == "Samara") return "SAMT-4";
+            if (city == "Vladivostok") return "VLAT-10";
+            if (city == "Yekaterinburg") return "YEKT-5";
+            // China / Taiwan / Hong Kong / Macau / Singapore / Malaysia / Philippines
+            if (city == "Beijing" || city == "Shanghai" || city == "Guangzhou" || city == "Tianjin" || city == "Hong Kong" || city == "Taipei" || city == "Singapore" || city == "Kuala Lumpur" || city == "Manila" || city == "Cebu" || city == "Davao" || city == "Macau" || city == "Shenzhen" || city == "Kaohsiung" || city == "Taichung" || city == "Tainan" || city == "Kota Kinabalu" || city == "Kuching" || city == "George Town" || city == "Wuhan" || city == "Xi'an" || city == "Xiamen" || city == "Zhengzhou" || city == "Wuxi" || city == "Urumqi") return "CST-8";
+            // Japan
+            if (city == "Tokyo" || city == "Osaka" || city == "Fukuoka" || city == "Kyoto" || city == "Nagoya" || city == "Sapporo" || city == "Yokohama") return "JST-9";
+            // Korea
+            if (city == "Seoul" || city == "Busan" || city == "Daegu" || city == "Daejeon" || city == "Gwangju" || city == "Incheon" || city == "Suwon" || city == "Ulsan" || city == "Pyongyang") return "KST-9";
+            // India / Sri Lanka
+            if (city == "Delhi" || city == "Mumbai" || city == "Kolkata" || city == "Chennai" || city == "Hyderabad" || city == "Ahmedabad" || city == "Bangalore" || city == "Chandigarh" || city == "Coimbatore" || city == "Indore" || city == "Jaipur" || city == "Kanpur" || city == "Kochi" || city == "Kozhikode" || city == "Lucknow" || city == "Madurai" || city == "Nagpur" || city == "Nashik" || city == "Noida" || city == "Patna" || city == "Pune" || city == "Surat" || city == "Thane" || city == "Thiruvananthapuram" || city == "Vadodara" || city == "Varanasi" || city == "Visakhapatnam" || city == "Colombo") return "IST-5:30";
+            // Indonesia
+            if (city == "Jakarta" || city == "Bandung" || city == "Medan" || city == "Pekanbaru" || city == "Semarang" || city == "Surabaya") return "WIB-7";
+            // Thailand / Vietnam / Cambodia / Laos
+            if (city == "Bangkok" || city == "Chiang Mai" || city == "Hanoi" || city == "Ho Chi Minh City" || city == "Phnom Penh" || city == "Vientiane") return "ICT-7";
+            // Myanmar
+            if (city == "Yangon" || city == "Naypyidaw" || city == "Mandalay") return "MMT-6:30";
+            // Bangladesh
+            if (city == "Dhaka" || city == "Chittagong" || city == "Khulna") return "BDT-6";
+            // Pakistan
+            if (city == "Lahore" || city == "Karachi" || city == "Islamabad" || city == "Faisalabad" || city == "Multan" || city == "Peshawar" || city == "Rawalpindi" || city == "Sialkot") return "PKT-5";
+            // Nepal
+            if (city == "Kathmandu" || city == "Pokhara") return "NPT-5:45";
+            // Uzbekistan / Turkmenistan
+            if (city == "Tashkent" || city == "Samarkand") return "UZT-5";
+            // Kyrgyzstan
+            if (city == "Bishkek") return "KGT-6";
+            // Kazakhstan
+            if (city == "Almaty" || city == "Astana" || city == "Nur-Sultan" || city == "Shymkent") return "KZT-5";
+            // UAE / Oman
+            if (city == "Dubai" || city == "Abu Dhabi" || city == "Sharjah" || city == "Muscat" || city == "Salalah" || city == "Ajman" || city == "Fujairah" || city == "Ras al-Khaimah" || city == "Umm al-Quwain") return "GST-4";
+            // Saudi / Iraq / Kuwait / Bahrain / Qatar / Yemen
+            if (city == "Baghdad" || city == "Basra" || city == "Mosul" || city == "Erbil" || city == "Riyadh" || city == "Jeddah" || city == "Mecca" || city == "Medina" || city == "Dammam" || city == "Kuwait City" || city == "Manama" || city == "Doha" || city == "Sanaa" || city == "Aden") return "AST-3";
+            // Iran
+            if (city == "Tehran" || city == "Isfahan" || city == "Karaj" || city == "Mashhad" || city == "Shiraz" || city == "Tabriz") return "IRST-3:30";
+            // Egypt / Jordan / Lebanon / Syria / Libya / Cyprus / Palestine
+            if (city == "Cairo" || city == "Alexandria" || city == "Giza" || city == "Luxor" || city == "Port Said" || city == "Amman" || city == "Beirut" || city == "Damascus" || city == "Jerusalem" || city == "Tel Aviv" || city == "Haifa" || city == "Tripoli") return "EET-2";
+            // Algeria
+            if (city == "Algiers" || city == "Oran" || city == "Constantine") return "CET-1";
+            // West Africa (WAT UTC+1)
+            if (city == "Lagos" || city == "Abuja" || city == "Benin City" || city == "Ibadan" || city == "Kaduna" || city == "Kano" || city == "Maiduguri" || city == "Port Harcourt" || city == "Kinshasa" || city == "Brazzaville" || city == "Luanda" || city == "Libreville" || city == "Yaounde" || city == "Douala" || city == "Cotonou" || city == "Porto-Novo" || city == "Lome" || city == "Accra" || city == "Niamey" || city == "Ouagadougou") return "WAT-1";
+            // South / Central Africa (SAST/CAT UTC+2)
+            if (city == "Johannesburg" || city == "Cape Town" || city == "Durban" || city == "Pretoria" || city == "Soweto" || city == "Port Elizabeth" || city == "Gaborone" || city == "Harare" || city == "Lusaka" || city == "Maputo" || city == "Windhoek" || city == "Maseru" || city == "Mbabane" || city == "Antananarivo" || city == "Port Louis" || city == "Khartoum") return "SAST-2";
+            // East Africa (EAT UTC+3)
+            if (city == "Nairobi" || city == "Addis Ababa" || city == "Bujumbura" || city == "Dar es Salaam" || city == "Dodoma" || city == "Entebbe" || city == "Gitega" || city == "Juba" || city == "Kampala" || city == "Kigali" || city == "Mombasa" || city == "Mogadishu" || city == "Moroni" || city == "Victoria" || city == "Zanzibar City" || city == "Djibouti" || city == "Asmara") return "EAT-3";
+            // West Africa coast (GMT UTC+0)
+            if (city == "Accra" || city == "Bamako" || city == "Banjul" || city == "Bissau" || city == "Conakry" || city == "Dakar" || city == "Freetown" || city == "Lome" || city == "Monrovia" || city == "Nouakchott" || city == "Ouagadougou" || city == "Praia" || city == "Yamoussoukro") return "GMT0";
+            // US / Canada East (EST/EDT)
+            if (city == "New York" || city == "Boston" || city == "Philadelphia" || city == "Baltimore" || city == "Washington DC" || city == "Atlanta" || city == "Charlotte" || city == "Raleigh" || city == "Norfolk" || city == "Richmond" || city == "Pittsburgh" || city == "Cleveland" || city == "Cincinnati" || city == "Indianapolis" || city == "Detroit" || city == "Louisville" || city == "Nashville" || city == "Memphis" || city == "St Louis" || city == "Miami" || city == "Tampa" || city == "Jacksonville" || city == "New Orleans" || city == "Milwaukee" || city == "Toronto" || city == "Ottawa" || city == "Montreal" || city == "Quebec City" || city == "Hamilton" || city == "Halifax") return "EST5EDT,M3.2.0,M11.1.0";
+            // US / Canada Central (CST/CDT)
+            if (city == "Chicago" || city == "Dallas" || city == "Houston" || city == "San Antonio" || city == "Austin" || city == "Fort Worth" || city == "Oklahoma City" || city == "Kansas City" || city == "Minneapolis" || city == "St Paul" || city == "Milwaukee" || city == "Des Moines" || city == "Omaha" || city == "Wichita" || city == "Winnipeg" || city == "Regina" || city == "Saskatoon") return "CST6CDT,M3.2.0,M11.1.0";
+            // US / Canada Mountain (MST/MDT)
+            if (city == "Denver" || city == "Salt Lake City" || city == "Edmonton" || city == "Calgary" || city == "Colorado Springs" || city == "Albuquerque" || city == "Santa Fe" || city == "Helena" || city == "Tucson") return "MST7MDT,M3.2.0,M11.1.0";
+            // Arizona (no DST)
+            if (city == "Phoenix") return "MST7";
+            // US / Canada Pacific (PST/PDT)
+            if (city == "Los Angeles" || city == "San Francisco" || city == "San Diego" || city == "San Jose" || city == "Oakland" || city == "Seattle" || city == "Portland" || city == "Sacramento" || city == "Las Vegas" || city == "Vancouver" || city == "Victoria") return "PST8PDT,M3.2.0,M11.1.0";
+            // Alaska
+            if (city == "Anchorage" || city == "Fairbanks" || city == "Juneau") return "AKST9AKDT,M3.2.0,M11.1.0";
+            // Mexico Central
+            if (city == "Mexico City" || city == "Guadalajara" || city == "Leon" || city == "Merida" || city == "Monterrey" || city == "Puebla" || city == "Queretaro" || city == "San Luis Potosi" || city == "Tijuana" || city == "Toluca" || city == "Mazatlan") return "CST6";
+            // Cuba
+            if (city == "Havana") return "CST5CDT,M3.2.0,M11.1.0";
+            // Central America / Caribbean (no DST)
+            if (city == "Guatemala City" || city == "San Salvador" || city == "Tegucigalpa" || city == "Managua" || city == "San Jose" || city == "Panama City" || city == "Belize City" || city == "Port-au-Prince" || city == "Santo Domingo" || city == "San Juan" || city == "Nassau" || city == "Kingston" || city == "Port of Spain" || city == "Georgetown" || city == "Paramaribo" || city == "Cayenne") return "EST5";
+            // Colombia / Ecuador / Peru
+            if (city == "Bogota" || city == "Medellin" || city == "Cali" || city == "Cartagena" || city == "Barranquilla" || city == "Bucaramanga" || city == "Lima" || city == "Arequipa" || city == "Trujillo" || city == "Cusco" || city == "Quito" || city == "Guayaquil") return "EST5";
+            // Venezuela
+            if (city == "Caracas" || city == "Maracaibo" || city == "Barquisimeto" || city == "Valencia" || city == "Maracay") return "VET4";
+            // Bolivia
+            if (city == "La Paz" || city == "Santa Cruz" || city == "Sucre" || city == "Cochabamba") return "BOT4";
+            // Brazil East
+            if (city == "Sao Paulo" || city == "Rio de Janeiro" || city == "Brasilia" || city == "Salvador" || city == "Fortaleza" || city == "Belo Horizonte" || city == "Curitiba" || city == "Recife" || city == "Porto Alegre" || city == "Manaus" || city == "Belem") return "BRT3";
+            // Argentina / Uruguay / Paraguay
+            if (city == "Buenos Aires" || city == "Cordoba" || city == "Rosario" || city == "Mendoza" || city == "Santa Fe" || city == "Montevideo" || city == "Asuncion") return "ART3";
+            // Chile
+            if (city == "Santiago" || city == "Valparaiso" || city == "Concepcion" || city == "Antofagasta") return "CLT4";
+            // Australia East (AEST/AEDT)
+            if (city == "Sydney" || city == "Melbourne" || city == "Canberra" || city == "Hobart" || city == "Wollongong" || city == "Newcastle" || city == "Gold Coast" || city == "Cairns" || city == "Townsville") return "AEST-10AEDT,M10.1.0,M4.1.0/3";
+            // Australia Central with DST
+            if (city == "Adelaide") return "ACST-9:30ACDT,M10.1.0,M4.1.0/3";
+            // Australia Central no DST
+            if (city == "Darwin") return "ACST-9:30";
+            // Australia West
+            if (city == "Perth") return "AWST-8";
+            // Brisbane no DST
+            if (city == "Brisbane") return "AEST-10";
+            // New Zealand
+            if (city == "Auckland" || city == "Wellington" || city == "Christchurch" || city == "Hamilton" || city == "Dunedin") return "NZST-12NZDT,M9.5.0,M4.1.0/3";
+            // Pacific
+            if (city == "Suva") return "FJT-12";
+            if (city == "Port Moresby") return "PGT-10";
+            if (city == "Honolulu") return "HST10";
+            if (city == "Papeete") return "TAHT10";
+            if (city == "Nuku'alofa") return "TOT-13";
+            if (city == "Apia") return "WST-13";
+            // Mongolia
+            if (city == "Ulaanbaatar") return "ULAT-8";
+            // Azerbaijan / Georgia / Armenia
+            if (city == "Baku") return "AZT-4";
+            if (city == "Tbilisi") return "GET-4";
+            if (city == "Yerevan") return "AMT-4";
+            // Iceland
+            if (city == "Reykjavik") return "GMT0";
+            return "UTC0";
+          };
+          const char* tz = city_to_tz(id(city_select).current_option());
+          ESP_LOGI("timezone", "City=%s TZ=%s", id(city_select).current_option().c_str(), tz);
+          id(sntp_time).set_timezone(tz);
+      - lambda: |-
+          auto hash_str = [](const std::string& s) -> uint32_t {
+            uint32_t h = 5381;
+            for (char c : s) h = ((h << 5) + h) + c;
+            return h;
+          };
+          std::string city = id(city_select).current_option();
+          uint32_t current_hash = hash_str(city);
+          float lat = id(city_lat_f);
+          float lon = id(city_lon_f);
+          uint32_t cached_hash = id(cached_city_hash);
+          ESP_LOGI("geocode", "City=%s hash=%u cached=%u lat=%.4f lon=%.4f", city.c_str(), current_hash, cached_hash, lat, lon);
+          if (current_hash == cached_hash && lat != 0.0f && lon != 0.0f) {
+            ESP_LOGI("geocode", "Cache hit, using cached coordinates");
+          } else {
+            ESP_LOGI("geocode", "Cache miss, will geocode");
+            id(city_lat_f) = 0.0f;
+            id(city_lon_f) = 0.0f;
+            id(cached_city_hash) = 0;
+          }
+      - if:
+          condition:
+            lambda: |-
+              return id(city_lat_f) != 0.0f && id(city_lon_f) != 0.0f;
+          then:
+            - script.execute: fetch_weather
+            - script.execute: fetch_air_quality
+      - if:
+          condition:
+            lambda: |-
+              return id(city_lat_f) == 0.0f || id(city_lon_f) == 0.0f;
+          then:
+            - lambda: |-
+                ESP_LOGI("geocode", "Geocoding %s...", id(city_select).current_option().c_str());
+            - lambda: |-
+                std::string city = id(city_select).current_option();
+                std::string enc;
+                for (char c : city) {
+                  if (c == ' ') enc += "%20";
+                  else enc += c;
+                }
+                std::string url = std::string("https://geocoding-api.open-meteo.com/v1/search?name=") + enc + "&count=1";
+                ESP_LOGI("geocode", "Request URL: %s", url.c_str());
+            - http_request.get:
+                url: !lambda |-
+                  std::string city = id(city_select).current_option();
+                  std::string enc;
+                  for (char c : city) {
+                    if (c == ' ') enc += "%20";
+                    else enc += c;
+                  }
+                  return std::string("https://geocoding-api.open-meteo.com/v1/search?name=") + enc + "&count=1";
+                capture_response: true
+                max_response_buffer_size: 4096
+                on_response:
+                  then:
+                    - lambda: |-
+                        ESP_LOGI("geocode", "HTTP %d, body_len=%d", response->status_code, body.length());
+                        if (response->status_code != 200) {
+                          ESP_LOGW("geocode", "Geocoding HTTP %d", response->status_code);
+                          id(data_ready_weather) = true;
+                          id(data_ready_aq) = true;
+                          return;
+                        }
+                        JsonDocument doc;
+                        DeserializationError err = deserializeJson(doc, body.c_str());
+                        if (err) {
+                          ESP_LOGW("geocode", "Geocoding JSON error: %s", err.c_str());
+                          id(data_ready_weather) = true;
+                          id(data_ready_aq) = true;
+                          return;
+                        }
+                        JsonArray results = doc["results"];
+                        if (results.size() == 0) {
+                          ESP_LOGW("geocode", "No results for %s", id(city_select).current_option().c_str());
+                          id(data_ready_weather) = true;
+                          id(data_ready_aq) = true;
+                          return;
+                        }
+                        float lat_f = results[0]["latitude"] | 0.0f;
+                        float lon_f = results[0]["longitude"] | 0.0f;
+                        id(city_lat_f) = lat_f;
+                        id(city_lon_f) = lon_f;
+                        auto hash_str = [](const std::string& s) -> uint32_t {
+                          uint32_t h = 5381;
+                          for (char c : s) h = ((h << 5) + h) + c;
+                          return h;
+                        };
+                        id(cached_city_hash) = hash_str(id(city_select).current_option());
+                        ESP_LOGI("geocode", "Resolved %s -> lat=%.4f lon=%.4f hash=%u", id(city_select).current_option().c_str(), lat_f, lon_f, id(cached_city_hash));
+                    - script.execute: fetch_weather
+                    - script.execute: fetch_air_quality
+                on_error:
+                  then:
+                    - lambda: |-
+                        ESP_LOGW("geocode", "Geocoding request failed");
+                        id(data_ready_weather) = true;
+                        id(data_ready_aq) = true;
+                    - script.execute: check_display
+
+  - id: fetch_weather
+    mode: single
+    then:
+      - lambda: |-
+          char buf[280];
+          snprintf(buf, sizeof(buf), "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,relative_humidity_2m,weather_code,uv_index,is_day&daily=sunrise,sunset&timezone=auto", id(city_lat_f), id(city_lon_f));
+          ESP_LOGI("weather", "Request URL: %s", buf);
+      - http_request.get:
+          url: !lambda |-
+            char buf[280];
+            snprintf(buf, sizeof(buf), "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,relative_humidity_2m,weather_code,uv_index,is_day&daily=sunrise,sunset&timezone=auto", id(city_lat_f), id(city_lon_f));
+            return std::string(buf);
+          capture_response: true
+          max_response_buffer_size: 4096
+          on_response:
+            then:
+              - lambda: |-
+                  ESP_LOGI("weather", "HTTP status=%d body_len=%d", response->status_code, body.length());
+                  if (response->status_code != 200) {
+                    ESP_LOGW("weather", "Weather API HTTP %d", response->status_code);
+                    id(data_ready_weather) = true;
+                    return;
+                  }
+                  ESP_LOGI("weather", "Body: %.256s", body.c_str());
+                  JsonDocument doc;
+                  DeserializationError err = deserializeJson(doc, body.c_str());
+                  if (err) {
+                    ESP_LOGW("weather", "Weather JSON error: %s", err.c_str());
+                    id(data_ready_weather) = true;
+                    return;
+                  }
+                  float temp = doc["current"]["temperature_2m"] | NAN;
+                  int hum = doc["current"]["relative_humidity_2m"] | 0;
+                  float uv = doc["current"]["uv_index"] | NAN;
+                  int wcode = doc["current"]["weather_code"] | -1;
+                  const char* sr = doc["daily"]["sunrise"][0] | "--:--";
+                  const char* ss = doc["daily"]["sunset"][0] | "--:--";
+                  ESP_LOGI("weather", "Parsed: temp=%.1f hum=%d uv=%.1f code=%d sr=%s ss=%s", temp, hum, uv, wcode, sr ? sr : "null", ss ? ss : "null");
+                  id(outdoor_temp).publish_state(temp);
+                  id(outdoor_hum).publish_state(hum);
+                  id(uv_index).publish_state(uv);
+                  id(weather_code).publish_state(wcode);
+                  char sr_time[6] = "--:--";
+                  char ss_time[6] = "--:--";
+                  const char* t = strchr(sr, 'T');
+                  if (t) { strncpy(sr_time, t + 1, 5); sr_time[5] = '\0'; }
+                  id(sunrise_time) = sr_time;
+                  t = strchr(ss, 'T');
+                  if (t) { strncpy(ss_time, t + 1, 5); ss_time[5] = '\0'; }
+                  id(sunset_time) = ss_time;
+                  const char* wtxt = "Unknown";
+                  if (wcode == 0) wtxt = "Clear";
+                  else if (wcode == 1) wtxt = "Mainly Clear";
+                  else if (wcode == 2) wtxt = "Partly Cloudy";
+                  else if (wcode == 3) wtxt = "Overcast";
+                  else if (wcode == 45 || wcode == 48) wtxt = "Fog";
+                  else if (wcode >= 51 && wcode <= 57) wtxt = "Drizzle";
+                  else if (wcode >= 61 && wcode <= 67) wtxt = "Rain";
+                  else if (wcode >= 71 && wcode <= 77) wtxt = "Snow";
+                  else if (wcode >= 80 && wcode <= 82) wtxt = "Showers";
+                  else if (wcode >= 85 && wcode <= 86) wtxt = "Snow Showers";
+                  else if (wcode >= 95) wtxt = "Thunderstorm";
+                  ESP_LOGI("weather", "Weather text: %s", wtxt);
+                  id(weather_text) = wtxt;
+                  id(data_ready_weather) = true;
+              - script.execute: check_display
+          on_error:
+            then:
+              - lambda: |-
+                  ESP_LOGW("weather", "Weather HTTP request failed (network/timeout)");
+                  id(data_ready_weather) = true;
+              - script.execute: check_display
+
+  - id: fetch_air_quality
+    mode: single
+    then:
+      - lambda: |-
+          char buf[280];
+          snprintf(buf, sizeof(buf), "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=%.4f&longitude=%.4f&current=pm2_5,pm10&timezone=auto", id(city_lat_f), id(city_lon_f));
+          ESP_LOGI("aq", "Request URL: %s", buf);
+      - http_request.get:
+          url: !lambda |-
+            char buf[280];
+            snprintf(buf, sizeof(buf), "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=%.4f&longitude=%.4f&current=pm2_5,pm10&timezone=auto", id(city_lat_f), id(city_lon_f));
+            return std::string(buf);
+          capture_response: true
+          max_response_buffer_size: 4096
+          on_response:
+            then:
+              - lambda: |-
+                  ESP_LOGI("aq", "HTTP status=%d body_len=%d", response->status_code, body.length());
+                  if (response->status_code != 200) {
+                    ESP_LOGW("aq", "AQ API HTTP %d", response->status_code);
+                    id(data_ready_aq) = true;
+                    return;
+                  }
+                  ESP_LOGI("aq", "Body: %.256s", body.c_str());
+                  JsonDocument doc;
+                  DeserializationError err = deserializeJson(doc, body.c_str());
+                  if (err) {
+                    ESP_LOGW("aq", "AQ JSON error: %s", err.c_str());
+                    id(data_ready_aq) = true;
+                    return;
+                  }
+                  float pm25_val = doc["current"]["pm2_5"] | NAN;
+                  float pm10_val = doc["current"]["pm10"] | NAN;
+                  ESP_LOGI("aq", "Parsed: pm25=%.1f pm10=%.1f", pm25_val, pm10_val);
+                  id(pm25).publish_state(pm25_val);
+                  id(pm10).publish_state(pm10_val);
+                  id(data_ready_aq) = true;
+              - script.execute: check_display
+          on_error:
+            then:
+              - lambda: |-
+                  ESP_LOGW("aq", "AQ HTTP request failed (network/timeout)");
+                  id(data_ready_aq) = true;
+              - script.execute: check_display
+
+  - id: sleep_after_refresh
+    mode: restart
+    then:
+      - delay: 50s
+      - if:
+          condition:
+            lambda: |-
+              return id(wifi_component).has_sta() && id(deep_sleep_enabled).state && !id(alarm_active);
+          then:
+            - logger.log: "Display refresh complete, entering deep sleep"
+            - lambda: |-
+                ESP_LOGI("sleep", "Configuring GPIO3 as wake source");
+                esp_err_t err = esp_sleep_enable_ext0_wakeup(GPIO_NUM_3, 0);
+                if (err != ESP_OK) {
+                  ESP_LOGE("sleep", "Failed to enable ext0 wakeup: %d", err);
+                }
+            - deep_sleep.enter: deep_sleep_1
+          else:
+            - lambda: |-
+                if (!id(wifi_component).has_sta()) {
+                  ESP_LOGI("sleep", "No WiFi STA, staying awake for provisioning");
+                } else {
+                  ESP_LOGI("sleep", "Deep sleep disabled via switch, staying awake");
+                }
+                id(deep_sleep_1).prevent_deep_sleep();
+
+  - id: check_display
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: |-
+              ESP_LOGI("display", "check_display: weather=%d aq=%d updated=%d", id(data_ready_weather), id(data_ready_aq), id(display_updated));
+              return id(data_ready_weather) && id(data_ready_aq) && !id(display_updated);
+          then:
+            - lambda: |-
+                ESP_LOGI("display", "Both data sources ready, updating display");
+                id(display_updated) = true;
+            - component.update: epaper_display
+            - script.execute: sleep_after_refresh
+
+  - id: next_screen
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: |-
+              uint32_t now = millis();
+              return (now - id(last_nav_ms)) >= 1000;
+          then:
+            - lambda: |-
+                id(last_nav_ms) = millis();
+                id(current_screen) = (id(current_screen) + 1) % 3;
+                ESP_LOGI("display", "Next screen -> %d", id(current_screen));
+            - component.update: epaper_display
+            - script.execute: sleep_after_refresh
+
+  - id: prev_screen
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: |-
+              uint32_t now = millis();
+              return (now - id(last_nav_ms)) >= 1000;
+          then:
+            - lambda: |-
+                id(last_nav_ms) = millis();
+                id(current_screen) = (id(current_screen) + 3 - 1) % 3;
+                ESP_LOGI("display", "Prev screen -> %d", id(current_screen));
+            - component.update: epaper_display
+            - script.execute: sleep_after_refresh
+
+  - id: btn_right_nav
+    mode: restart
+    then:
+      - delay: 100ms
+      - if:
+          condition:
+            lambda: return !id(btn_left_pressed);
+          then:
+            - if:
+                condition:
+                  lambda: return id(alarm_edit_mode);
+                then:
+                  - lambda: |-
+                      if (id(alarm_edit_field) == 0) {
+                        id(alarm_hour) = (id(alarm_hour) + 1) % 24;
+                      } else {
+                        id(alarm_minute) = (id(alarm_minute) + 1) % 60;
+                      }
+                      ESP_LOGI("alarm", "Edit: %02d:%02d", id(alarm_hour), id(alarm_minute));
+                  - component.update: epaper_display
+                else:
+                  - script.execute: next_screen
+
+  - id: btn_left_nav
+    mode: restart
+    then:
+      - delay: 100ms
+      - if:
+          condition:
+            lambda: return !id(btn_right_pressed);
+          then:
+            - if:
+                condition:
+                  lambda: return id(alarm_edit_mode);
+                then:
+                  - lambda: |-
+                      if (id(alarm_edit_field) == 0) {
+                        id(alarm_hour) = (id(alarm_hour) + 23) % 24;
+                      } else {
+                        id(alarm_minute) = (id(alarm_minute) + 59) % 60;
+                      }
+                      ESP_LOGI("alarm", "Edit: %02d:%02d", id(alarm_hour), id(alarm_minute));
+                  - component.update: epaper_display
+                else:
+                  - script.execute: prev_screen
+
+  - id: btn_feedback
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(buzzer)->current_values.is_on() && !id(alarm_active);
+          then:
+            - lambda: id(buzzer_pwm).set_level(0.3f);
+            - delay: 50ms
+            - lambda: id(buzzer_pwm).set_level(0.0f);
+
+# Fallback: update display at 75s even if HTTP fails
+interval:
+  - interval: 75s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return !id(display_updated);
+          then:
+            - logger.log: "HTTP fallback timeout reached, forcing display update"
+            - lambda: |-
+                id(display_updated) = true;
+            - component.update: epaper_display
+            - script.execute: sleep_after_refresh
+
+  - interval: 100ms
+    then:
+      - lambda: |-
+          if (id(btn_left_pressed) && id(btn_right_pressed)) {
+            id(btn_combo_timer)++;
+            if (id(btn_combo_timer) == 30) {
+              id(buzzer_pwm).set_level(0.3f);
+            }
+            if (id(btn_combo_timer) == 35) {
+              id(buzzer_pwm).set_level(0.0f);
+            }
+            if (id(btn_combo_timer) == 40) {
+              id(buzzer_pwm).set_level(0.3f);
+            }
+            if (id(btn_combo_timer) == 45) {
+              id(buzzer_pwm).set_level(0.0f);
+            }
+            if (id(btn_combo_timer) >= 50) {
+              id(btn_combo_timer) = 0;
+              ESP_LOGI("wifi", "Both buttons held for 5s - FACTORY RESET");
+              id(buzzer_pwm).set_level(0.5f);
+              global_preferences->reset();
+              delay(200);
+              id(buzzer_pwm).set_level(0.0f);
+              App.safe_reboot();
+            }
+          } else {
+            id(btn_combo_timer) = 0;
+          }
+
+  - interval: 30s
+    then:
+      - lambda: |-
+          if (!id(alarm_enabled) || id(alarm_active)) return;
+          auto now = id(sntp_time).now();
+          if (!now.is_valid()) return;
+          if (now.hour == id(alarm_hour) && now.minute == id(alarm_minute)) {
+            ESP_LOGI("alarm", "ALARM TRIGGERED at %02d:%02d!", now.hour, now.minute);
+            id(alarm_active) = true;
+            id(alarm_buzzer_on) = true;
+            auto call = id(buzzer)->turn_on();
+            call.set_brightness(0.8f);
+            call.perform();
+            if (id(current_screen) != 2) {
+              id(current_screen) = 2;
+              id(last_nav_ms) = millis();
+            }
+            id(epaper_display).update();
+          }
+
+  - interval: 500ms
+    then:
+      - lambda: |-
+          if (!id(alarm_active)) return;
+          id(alarm_buzzer_on) = !id(alarm_buzzer_on);
+          if (id(alarm_buzzer_on)) {
+            auto call = id(buzzer)->turn_on();
+            call.set_brightness(0.8f);
+            call.perform();
+          } else {
+            id(buzzer)->turn_off().perform();
+          }
+
+display:
+  - platform: epaper_spi
+    id: epaper_display
+    model: Seeed-reTerminal-E1002
+    update_interval: never
+    lambda: |-
+      ESP_LOGI("display", "=== Display lambda starting ===");
+      ESP_LOGI("display", "Screen=%d city=%s out_temp=%.1f out_hum=%.0f uv=%.1f pm25=%.1f pm10=%.1f batt=%.1f", 
+                id(current_screen), id(city_select).current_option().c_str(), id(outdoor_temp).state, id(outdoor_hum).state, 
+                id(uv_index).state, id(pm25).state, id(pm10).state, id(battery_level).state);
+      const auto BLACK  = Color::BLACK;
+      const auto WHITE  = Color::WHITE;
+      const auto RED    = Color(255, 0, 0, 0);
+      const auto GREEN  = Color(0, 255, 0, 0);
+      const auto BLUE   = Color(0, 0, 255, 0);
+      const auto ORANGE = Color(255, 140, 0, 0);
+
+      // Helper lambdas for color coding
+      auto temp_color = [&](float t) -> Color {
+        if (isnan(t)) return BLACK;
+        if (t < 10.0f) return BLUE;
+        if (t > 26.0f) return RED;
+        return BLACK;
+      };
+      auto uv_color = [&](float uv) -> Color {
+        if (isnan(uv)) return BLACK;
+        if (uv < 3.0f) return GREEN;
+        if (uv < 6.0f) return BLACK;
+        return RED;
+      };
+      auto pm25_status_text = [&](float pm) -> const char* {
+        if (isnan(pm)) return "--";
+        if (pm <= 12.0f) return "Good (Safe to be outside)";
+        if (pm <= 35.4f) return "Moderate (Limit exertion)";
+        if (pm <= 55.4f) return "Sensitive (Avoid exertion)";
+        if (pm <= 150.4f) return "Unhealthy (Stay indoors)";
+        if (pm <= 250.4f) return "Very Unhealthy (Stay inside)";
+        return "Hazardous (Emergency)";
+      };
+      auto pm25_status_color = [&](float pm) -> Color {
+        if (isnan(pm)) return BLACK;
+        if (pm <= 12.0f) return GREEN;
+        if (pm <= 55.4f) return BLACK;
+        return RED;
+      };
+      auto pm10_status_text = [&](float pm) -> const char* {
+        if (isnan(pm)) return "--";
+        if (pm <= 54.0f) return "Good (Safe to be outside)";
+        if (pm <= 154.0f) return "Moderate (Limit exertion)";
+        if (pm <= 254.0f) return "Sensitive (Avoid exertion)";
+        if (pm <= 354.0f) return "Unhealthy (Stay indoors)";
+        if (pm <= 424.0f) return "Very Unhealthy (Stay inside)";
+        return "Hazardous (Emergency)";
+      };
+      auto pm10_status_color = [&](float pm) -> Color {
+        if (isnan(pm)) return BLACK;
+        if (pm <= 54.0f) return GREEN;
+        if (pm <= 254.0f) return BLACK;
+        return RED;
+      };
+
+      it.fill(WHITE);
+
+      if (id(current_screen) == 0) {
+        // ===== TOP HEADER BAR =====
+      it.filled_rectangle(0, 0, 800, 50, BLACK);
+
+      auto time_now = id(sntp_time).now();
+      if (time_now.is_valid()) {
+        char date_str[40];
+        time_now.strftime(date_str, sizeof(date_str), "%A, %d %b %Y");
+        it.print(20, 8, id(font_date), WHITE, date_str);
+      }
+
+      // Battery percentage
+      float batt = id(battery_level).state;
+      char batt_str[16];
+      if (isnan(batt)) {
+        snprintf(batt_str, sizeof(batt_str), "--%%");
+      } else {
+        snprintf(batt_str, sizeof(batt_str), "%.0f%%", batt);
+      }
+      it.print(700, 12, id(font_info), WHITE, batt_str);
+
+      // ===== LARGE TIME =====
+      if (time_now.is_valid()) {
+        char time_str[16];
+        time_now.strftime(time_str, sizeof(time_str), "%H:%M");
+        it.printf(400, 120, id(font_time), BLACK, TextAlign::CENTER, time_str);
+      }
+
+      // Divider below time
+      it.line(20, 205, 780, 205, BLACK);
+
+      // ===== THREE COLUMN INFO =====
+      // INDOOR (left)
+      it.print(30, 215, id(font_info), BLACK, "INDOOR");
+      float in_temp = id(sht4x_temp).state;
+      char in_temp_str[16];
+      if (isnan(in_temp)) {
+        snprintf(in_temp_str, sizeof(in_temp_str), "-- °C");
+      } else {
+        snprintf(in_temp_str, sizeof(in_temp_str), "%.1f °C", in_temp);
+      }
+      it.print(30, 248, id(font_info), temp_color(in_temp), in_temp_str);
+
+      float in_hum = id(sht4x_hum).state;
+      char in_hum_str[16];
+      if (isnan(in_hum)) {
+        snprintf(in_hum_str, sizeof(in_hum_str), "--%%");
+      } else {
+        snprintf(in_hum_str, sizeof(in_hum_str), "%.0f%%", in_hum);
+      }
+      it.print(30, 278, id(font_small), BLACK, in_hum_str);
+
+      // OUTDOOR (center)
+      it.print(300, 215, id(font_info), BLACK, "OUTDOOR");
+      it.print(300, 242, id(font_small), BLACK, id(city_select).current_option().c_str());
+
+      float out_temp = id(outdoor_temp).state;
+      char out_temp_str[16];
+      if (isnan(out_temp)) {
+        snprintf(out_temp_str, sizeof(out_temp_str), "-- °C");
+      } else {
+        snprintf(out_temp_str, sizeof(out_temp_str), "%.1f °C", out_temp);
+      }
+      it.print(300, 270, id(font_info), temp_color(out_temp), out_temp_str);
+
+      it.print(300, 298, id(font_small), BLACK, id(weather_text).c_str());
+
+      float out_hum = id(outdoor_hum).state;
+      char out_hum_str[16];
+      if (isnan(out_hum)) {
+        snprintf(out_hum_str, sizeof(out_hum_str), "--%%");
+      } else {
+        snprintf(out_hum_str, sizeof(out_hum_str), "%.0f%%", out_hum);
+      }
+      it.print(300, 325, id(font_small), BLACK, out_hum_str);
+
+      // SUN & UV (right)
+      it.print(580, 215, id(font_info), BLACK, "SUN & UV");
+      float uv = id(uv_index).state;
+      char uv_str[16];
+      if (isnan(uv)) {
+        snprintf(uv_str, sizeof(uv_str), "UV: --");
+      } else {
+        snprintf(uv_str, sizeof(uv_str), "UV: %.1f", uv);
+      }
+      it.print(580, 248, id(font_info), uv_color(uv), uv_str);
+
+      it.print(580, 278, id(font_small), BLACK, id(sunrise_time).c_str());
+      it.print(580, 305, id(font_small), BLACK, id(sunset_time).c_str());
+
+      // Divider above air quality
+      it.line(20, 365, 780, 365, BLACK);
+
+      // ===== AIR QUALITY =====
+      it.print(30, 378, id(font_info), BLACK, "AIR QUALITY");
+
+      float pm25_val = id(pm25).state;
+      char pm25_score[16];
+      if (isnan(pm25_val)) {
+        snprintf(pm25_score, sizeof(pm25_score), "--");
+      } else {
+        snprintf(pm25_score, sizeof(pm25_score), "%.0f/100+", pm25_val);
+      }
+      it.print(30, 415, id(font_info), BLACK, "PM2.5");
+      it.print(160, 415, id(font_info), BLACK, pm25_score);
+      it.print(380, 415, id(font_info), pm25_status_color(pm25_val), pm25_status_text(pm25_val));
+
+      float pm10_val = id(pm10).state;
+      char pm10_score[16];
+      if (isnan(pm10_val)) {
+        snprintf(pm10_score, sizeof(pm10_score), "--");
+      } else {
+        snprintf(pm10_score, sizeof(pm10_score), "%.0f/200+", pm10_val);
+      }
+      it.print(30, 450, id(font_info), BLACK, "PM10");
+      it.print(160, 450, id(font_info), BLACK, pm10_score);
+      it.print(380, 450, id(font_info), pm10_status_color(pm10_val), pm10_status_text(pm10_val));
+
+      // (footer area left blank since "Updated" text was removed)
+      } else if (id(current_screen) == 1) {
+        // ===== INFO SCREEN =====
+        it.filled_rectangle(0, 0, 800, 50, BLACK);
+
+        auto time_now = id(sntp_time).now();
+        if (time_now.is_valid()) {
+          char date_str[40];
+          time_now.strftime(date_str, sizeof(date_str), "%A, %d %b %Y");
+          it.print(20, 8, id(font_date), WHITE, date_str);
+        }
+
+        float batt = id(battery_level).state;
+        char batt_str[16];
+        if (isnan(batt)) {
+          snprintf(batt_str, sizeof(batt_str), "--%%");
+        } else {
+          snprintf(batt_str, sizeof(batt_str), "%.0f%%", batt);
+        }
+        it.print(700, 12, id(font_info), WHITE, batt_str);
+
+        it.print(400, 100, id(font_info), BLACK, TextAlign::CENTER, "DEVICE INFO");
+        it.line(20, 140, 780, 140, BLACK);
+
+        const char* ip = id(device_ip).state.c_str();
+        it.print(40, 170, id(font_info), BLACK, "IP Address");
+        it.print(40, 200, id(font_small), BLACK, ip[0] ? ip : "Not connected");
+
+        const char* mac = id(device_mac).state.c_str();
+        it.print(40, 250, id(font_info), BLACK, "MAC Address");
+        it.print(40, 280, id(font_small), BLACK, mac[0] ? mac : "--");
+
+        const char* ssid = id(wifi_ssid).state.c_str();
+        it.print(40, 330, id(font_info), BLACK, "WiFi Network");
+        it.print(40, 360, id(font_small), BLACK, ssid[0] ? ssid : "--");
+
+        float rssi = id(wifi_rssi).state;
+        char rssi_str[32];
+        if (isnan(rssi)) {
+          snprintf(rssi_str, sizeof(rssi_str), "-- dBm");
+        } else {
+          snprintf(rssi_str, sizeof(rssi_str), "%.0f dBm", rssi);
+        }
+        it.print(40, 410, id(font_info), BLACK, "Signal Strength");
+        it.print(40, 440, id(font_small), BLACK, rssi_str);
+      } else {
+        // ===== ALARM SCREEN =====
+        it.filled_rectangle(0, 0, 800, 50, BLACK);
+
+        auto time_now = id(sntp_time).now();
+        if (time_now.is_valid()) {
+          char date_str[40];
+          time_now.strftime(date_str, sizeof(date_str), "%A, %d %b %Y");
+          it.print(20, 8, id(font_date), WHITE, date_str);
+        }
+
+        float batt = id(battery_level).state;
+        char batt_str[16];
+        if (isnan(batt)) {
+          snprintf(batt_str, sizeof(batt_str), "--%%");
+        } else {
+          snprintf(batt_str, sizeof(batt_str), "%.0f%%", batt);
+        }
+        it.print(700, 12, id(font_info), WHITE, batt_str);
+
+        if (id(alarm_edit_mode)) {
+          it.print(400, 100, id(font_info), RED, TextAlign::CENTER, "SET ALARM");
+        } else {
+          it.print(400, 100, id(font_info), BLACK, TextAlign::CENTER, "ALARM");
+        }
+        it.line(20, 140, 780, 140, BLACK);
+
+        char alarm_str[16];
+        snprintf(alarm_str, sizeof(alarm_str), "%02d:%02d", id(alarm_hour), id(alarm_minute));
+        it.printf(400, 260, id(font_time), BLACK, TextAlign::CENTER, alarm_str);
+
+        if (id(alarm_edit_mode)) {
+          const char* edit_label = id(alarm_edit_field) == 0 ? "EDITING HOUR" : "EDITING MINUTE";
+          it.print(400, 380, id(font_info), RED, TextAlign::CENTER, edit_label);
+          it.print(400, 420, id(font_small), BLACK, TextAlign::CENTER, "White buttons = adjust  |  Green = next/save");
+        } else {
+          const char* status = id(alarm_active) ? "RINGING!" : (id(alarm_enabled) ? "ENABLED" : "DISABLED");
+          Color status_color = id(alarm_active) ? RED : (id(alarm_enabled) ? GREEN : BLACK);
+          it.print(400, 380, id(font_info), status_color, TextAlign::CENTER, status);
+
+          if (time_now.is_valid()) {
+            char cur_time[16];
+            time_now.strftime(cur_time, sizeof(cur_time), "%H:%M");
+            it.print(400, 440, id(font_small), BLACK, TextAlign::CENTER, cur_time);
+          }
+
+          if (id(alarm_active)) {
+            it.print(400, 470, id(font_small), RED, TextAlign::CENTER, "Press green button to stop");
+          } else {
+            it.print(400, 470, id(font_small), BLACK, TextAlign::CENTER, "Hold green 2s=set  5s=toggle");
+          }
+        }
+      }
