@@ -1574,9 +1574,9 @@ script:
             - delay: 50ms
             - lambda: id(buzzer_pwm).set_level(0.0f);
 
-# Fallback: update display at 45s even if HTTP fails
+# Fallback: update display at 15s even if HTTP fails
 interval:
-  - interval: 45s
+  - interval: 15s
     then:
       - if:
           condition:
