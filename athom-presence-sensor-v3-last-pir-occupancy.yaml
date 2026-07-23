@@ -83,20 +83,8 @@ wifi:
 
 captive_portal:
 
-esp32_improv:
-  authorizer: none
-
 dashboard_import:
   package_import_url: github://athom-tech/esp32-configs/athom-presence-sensor-v3.yaml
-
-# esp32_ble_tracker:
-#   scan_parameters:
-#     interval: 1100ms
-#     window: 1100ms
-#     active: true
-
-# bluetooth_proxy:
-#   active: true
 
 light:
   - platform: status_led
@@ -115,13 +103,6 @@ uart:
   tx_pin: GPIO8
   rx_pin: GPIO5
   baud_rate: 115200
-  # debug:
-  #   direction: BOTH
-  #   dummy_receiver: true
-  #   after:
-  #     delimiter: "\n"
-  #   sequence:
-  #     - lambda: UARTDebug::log_string(direction, bytes);
 
 binary_sensor:
   - platform: status
