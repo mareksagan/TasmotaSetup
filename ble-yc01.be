@@ -34,13 +34,18 @@
 #   yc01info                      print device-info + calibration state
 #   yc01active 0|1                set Tasmota BLE passive (0) / active (1) scan
 #   yc01find                      run a 10 s manual BLE scan to locate the meter
+#   yc01poll <seconds>            change read interval (default 30, min 10)
 #
-# Troubleshooting connection timeouts:
+# Troubleshooting connection timeouts / stale values:
 #   - The meter must be awake and advertising.  Tasmota default scan is
 #     PASSIVE; the YINMIK app uses ACTIVE scan, so run:  yc01active 1
 #   - Make sure no phone/app is already connected to the meter.
 #   - If POWER2 controls meter power, ensure it is ON and wait a few
 #     seconds for the meter to start advertising before issuing yc01find.
+#   - This meter tends to sleep between connections.  The default poll is
+#     30 s to catch advertising windows.  Increase it (e.g. yc01poll 300)
+#     if you want to save meter battery.
+#   - To force a wake-up / start measurement manually:  yc01start
 #======================================================================
 
 class YC01 : Driver
@@ -52,6 +57,7 @@ class YC01 : Driver
     var do_init, do_sync, last_sync
     var queue, q_read
     var cal, devinfo
+    var scan_init
 
     # addr_type: 0 = public (default, matches Tasmota scan display), 1 = random.
     def init(mac, poll_s, addr_type)
@@ -59,12 +65,12 @@ class YC01 : Driver
         self.mac = mac
         self.mac_hex = string.toupper(string.replace(mac, ":", ""))
         self.addr_type = (addr_type == nil) ? 0 : addr_type
-        self.poll_s = (poll_s == nil) ? 300 : poll_s
+        self.poll_s = (poll_s == nil) ? 30 : poll_s
         self.last = {}
         self.last_ok = -1
         self.last_seen = -1
         self.rssi = 0
-        self.tick = self.poll_s - 20
+        self.tick = self.poll_s - 10
         self.awaiting = false
         self.watchdog = 0
         self.phase = 0                      # 0 idle, 1 sync, 2 init, 3 read, 4 cmd-writes
@@ -78,16 +84,17 @@ class YC01 : Driver
         self.q_read = false
         self.cal = {}
         self.devinfo = ""
+        self.scan_init = false
         tasmota.add_rule("BLEOperation#read",     /v, t, m -> self.got_data(v, m))
         tasmota.add_rule("BLEOperation#notify",   /v, t, m -> self.got_data(v, m))
         tasmota.add_rule("BLEOperation#state",    /v, t, m -> self.got_state(v, m))
-        # The BLEDevices list is nested under the BLE topic, so listen to the
-        # whole BLE message and extract BLEDevices manually.  This is more
-        # robust than relying on the BLE#BLEDevices trigger.
-        tasmota.add_rule("BLE",                  /v, t, m -> self._on_ble_msg(v, m))
+        # Try both triggers; one passes BLEDevices as value, the other nests it
+        # inside the full BLE message.
+        tasmota.add_rule("BLE#BLEDevices",        /v, t, m -> self.seen_adverts(v))
+        tasmota.add_rule("BLE",                   /v, t, m -> self._on_ble_msg(v, m))
         log(string.format("YC01: driver v3.5 started, MAC %s type %i poll %is",
                           self.mac, self.addr_type, self.poll_s))
-        log("YC01: hint: if the meter is not found, try active scan: BLEScan0 1")
+        log("YC01: active scan will be enabled automatically in ~10 s")
     end
 
     # ---- helpers -------------------------------------------------------
@@ -158,13 +165,9 @@ class YC01 : Driver
         if self.last_seen < 0
             log("YC01: WARNING - meter never seen in BLE adverts; wake it and verify the MAC (try BLEScan0 1)", 2)
         end
-        if self.do_sync && now - self.last_sync > 21600 && self._sync_payload() != nil
-            self.phase = 1
-        elif self.do_init
-            self.phase = 2
-        else
-            self.phase = 3
-        end
+        # Simple read+notify, matching the original working script.  The
+        # start-measurement command is available manually via yc01start.
+        self.phase = 3
         self._issue()
     end
 
@@ -270,11 +273,18 @@ class YC01 : Driver
         end
     end
 
-    # Handle the full BLE topic message; extract BLEDevices if present.
+    # The BLE topic message contains BLEDevices and BLE stats.  Depending on
+    # the exact Tasmota rule trigger, the devices map may arrive as the value
+    # (BLE#BLEDevices) or inside the full message (BLE).  Check both.
     def _on_ble_msg(v, msg)
-        if v == nil   return   end
-        if v.contains("BLEDevices")
-            self.seen_adverts(v["BLEDevices"])
+        var devices = nil
+        if v != nil && v.contains("BLEDevices")
+            devices = v["BLEDevices"]
+        elif msg != nil && msg.contains("BLEDevices")
+            devices = msg["BLEDevices"]
+        end
+        if devices != nil
+            self.seen_adverts(devices)
         end
     end
 
@@ -464,6 +474,15 @@ class YC01 : Driver
         tasmota.cmd("BLEScan1 10")
     end
 
+    # Change the polling interval.  Shorter intervals keep sleepy meters awake.
+    def cmd_poll(s)
+        if s < 10   s = 10   end
+        if s > 3600   s = 3600   end
+        self.poll_s = s
+        self.tick = 0
+        log("YC01: poll interval set to " + str(s) + " s")
+    end
+
     def cmd_calset(std)
         var v = int(std * 1000 + 0.5)
         if v < 0   v = 0   end
@@ -499,6 +518,11 @@ class YC01 : Driver
     # ---- scheduling ------------------------------------------------------
 
     def every_second()
+        # Enable active scan once BLE is up (driver init runs before BLE starts).
+        if !self.scan_init && tasmota.millis() > 10000
+            self.cmd_active_scan(true)
+            self.scan_init = true
+        end
         if self.awaiting
             self.watchdog += 1
             if self.watchdog > 45
@@ -577,7 +601,8 @@ class YC01 : Driver
 end
 
 # addr_type defaults to 1 (random static) - required for a 41:.. MAC
-yc01 = YC01("414284588113", 300)
+# default poll interval is 30 s (pass nil or omit to use default)
+yc01 = YC01("414284588113", nil)
 tasmota.add_driver(yc01)
 
 # ---- console commands ---------------------------------------------------
@@ -707,3 +732,10 @@ def yc01find_cmd(cmd, idx, payload, payload_json)
     return true
 end
 tasmota.add_cmd("yc01find", yc01find_cmd)
+
+def yc01poll_cmd(cmd, idx, payload, payload_json)
+    yc01.cmd_poll(int(payload))
+    tasmota.resp_cmnd_done()
+    return true
+end
+tasmota.add_cmd("yc01poll", yc01poll_cmd)
