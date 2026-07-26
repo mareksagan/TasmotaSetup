@@ -202,7 +202,7 @@ class YC01 : Driver
         self.awaiting = true
         self.watchdog = 0
         self.last_try = now
-        if self.last_seen < 0
+        if self.last_seen < 0 && (self.last_ok < 0 || now - self.last_ok > 120)
             log("YC01: WARNING - meter never seen in BLE adverts; wake it and verify the MAC (try BLEScan0 1)", 2)
         end
         # Simple read+notify, matching the original working script.  The
@@ -711,8 +711,21 @@ class YC01 : Driver
                 state = state + " (HOLD)"
             end
             self._ws("{s}Status{m}" + state + "{e}")
+            var age = self._age()
+            var delay = age - self.poll_s
+            if delay < 0   delay = 0   end
+            var delay_txt = string.format("%i s", delay)
+            if delay > 0
+                delay_txt = "<span style='color:red'>" + delay_txt + "</span>"
+            end
+            self._ws(string.format("{s}Sync delay{m}%s{e}", delay_txt))
+            var batt_txt = string.format("%i", self.last["Batt"]) + " ％"
+            if self.last["Batt"] < 60
+                batt_txt = "<span style='color:red'>" + batt_txt + "</span>"
+            end
+            self._ws(string.format("{s}Battery{m}%s{e}", batt_txt))
             self._ws(string.format("{s}pH{m}%s{e}",                  self._colored_val("%.2f", self.last["pH"],   "pH")))
-            self._ws(string.format("{s}EC (%s){m}%s{e}",              self.last["ECu"], self._colored_val("%.1f", self.last["EC"],  "EC")))
+            self._ws(string.format("{s}EC{m}%s %s{e}",              self._colored_val("%.1f", self.last["EC"],  "EC"), self.last["ECu"]))
             self._ws(string.format("{s}TDS{m}%s ppm{e}",             self._colored_val("%.1f", self.last["TDS"],  "TDS")))
             self._ws(string.format("{s}SALT{m}%.1f ppm{e}",          self.last["SALT"]))
             self._ws(string.format("{s}ORP{m}%s{e}",                 self._colored_val("%.2f", self.last["ORP"],  "ORP")))
@@ -722,19 +735,6 @@ class YC01 : Driver
             end
             self._ws(string.format("{s}Chlorine{m}%s mg/L{e}",       self._colored_val("%.2f", self.last["Cl"],   "Cl")))
             self._ws(string.format("{s}Temperature{m}%s &deg;C{e}",  self._colored_val("%.1f", self.last["Temp"], "Temp")))
-            var batt_txt = string.format("%i", self.last["Batt"]) + " ％"
-            if self.last["Batt"] < 60
-                batt_txt = "<span style='color:red'>" + batt_txt + "</span>"
-            end
-            self._ws(string.format("{s}Battery{m}%s{e}", batt_txt))
-            var age = self._age()
-            var overdue = (age > self.poll_s)
-            var age_disp = (age < 0) ? 0 : age
-            var age_txt = string.format("%i s ago", age_disp)
-            if overdue
-                age_txt = "<span style='color:red'>" + age_txt + "</span>"
-            end
-            self._ws(string.format("{s}Last update{m}%s{e}", age_txt))
             if self.cal.size() > 0
                 for k : self.cal.keys()
                     self._ws("{s}Cal " + k + "{m}" + self.cal[k] + "{e}")
