@@ -3,15 +3,16 @@
 #           v3.5 - protocol matching the original working script for this
 #           meter firmware (public address, simple read+notify, old frame layout).
 #
-# Protocol summary:
-#  * GATT: service 0xFF01, single characteristic 0xFF02 for
-#    read + notify + WRITE.
+# Protocol summary (from WaterQualityApp / BLE-YC01-PROTOCOL.md):
+#  * GATT: service 0xFF01, characteristic 0xFF02 for READ + WRITE.
+#    The meter does NOT push notifications; the host must READ FF02.
 #  * RX frames (meter -> app): every byte de-obfuscated (see decode()).
 #  * Data frame: b[0]=1, b[1]=2, b[2]=15 (BLE-YC01), then BE s16 values at
 #    offsets 3..15:
 #      pH   = s16(b[3..4]) / 100
 #      EC   = s16(b[5..6])            (raw uS/cm)
 #      TDS  = s16(b[7..8])            (ppm)
+#      SALT = EC * 0.55               (ppm, app/HA convention)
 #      ORP  = s16(b[9..10])           (mV)
 #      Cl   = max(0, s16(b[11..12])) / 10   (mg/L)
 #      Temp = s16(b[13..14]) / 10     (C)
@@ -30,22 +31,28 @@
 #   yc01calreq                    request calibration data (shows in log/UI)
 #   yc01calset <std_value>        calibration: set standard (e.g. 6.86)
 #   yc01calapply                  calibration: confirm/apply
+#   yc01orpcal <mV>               match displayed ORP to meter/app (e.g. 268)
 #   yc01send <hex>                send raw frame (checksum appended)
 #   yc01info                      print device-info + calibration state
 #   yc01active 0|1                set Tasmota BLE passive (0) / active (1) scan
 #   yc01find                      run a 10 s manual BLE scan to locate the meter
-#   yc01poll <seconds>            change read interval (default 30, min 10)
+#   yc01poll <seconds>            change read interval (default 50, min 10)
 #
 # Troubleshooting connection timeouts / stale values:
 #   - The meter must be awake and advertising.  Tasmota default scan is
 #     PASSIVE; the YINMIK app uses ACTIVE scan, so run:  yc01active 1
 #   - Make sure no phone/app is already connected to the meter.
-#   - If POWER2 controls meter power, ensure it is ON and wait a few
-#     seconds for the meter to start advertising before issuing yc01find.
-#   - This meter tends to sleep between connections.  The default poll is
-#     30 s to catch advertising windows.  Increase it (e.g. yc01poll 300)
-#     if you want to save meter battery.
-#   - To force a wake-up / start measurement manually:  yc01start
+#   - This meter is battery powered; no relay power control is needed.
+#   - The meter auto-powers off after ~5 min without an active BLE connection.
+#     The official app keeps a persistent connection and reads FF02 every
+#     4 min.  This driver defaults to 50 s polling with keep-alive so the
+#     GATT connection is reused between reads and the meter stays awake.
+#   - On boot the driver automatically enables active scan and begins
+#     scheduled reads of FF02 (the app keeps a connection and reads FF02).
+#   - To force a start-measurement command manually:  yc01start
+#   - If the meter becomes unresponsive after failed connections, remove the
+#     batteries for a few seconds (the protocol notes that improper
+#     disconnects can freeze the device).
 #======================================================================
 
 class YC01 : Driver
@@ -57,6 +64,8 @@ class YC01 : Driver
     var do_init, do_sync, last_sync
     var queue, q_read
     var cal, devinfo
+    var orp_offset, orp_raw
+    var hold
     var scan_init
 
     # addr_type: 0 = public (default, matches Tasmota scan display), 1 = random.
@@ -65,7 +74,7 @@ class YC01 : Driver
         self.mac = mac
         self.mac_hex = string.toupper(string.replace(mac, ":", ""))
         self.addr_type = (addr_type == nil) ? 0 : addr_type
-        self.poll_s = (poll_s == nil) ? 30 : poll_s
+        self.poll_s = (poll_s == nil) ? 50 : poll_s
         self.last = {}
         self.last_ok = -1
         self.last_seen = -1
@@ -84,6 +93,9 @@ class YC01 : Driver
         self.q_read = false
         self.cal = {}
         self.devinfo = ""
+        self.orp_offset = 0                 # manual ORP calibration offset (mV)
+        self.orp_raw = 0                    # last raw ORP before offset
+        self.hold = false                   # hold flag from status byte (offset 17)
         self.scan_init = false
         tasmota.add_rule("BLEOperation#read",     /v, t, m -> self.got_data(v, m))
         tasmota.add_rule("BLEOperation#notify",   /v, t, m -> self.got_data(v, m))
@@ -98,6 +110,34 @@ class YC01 : Driver
     end
 
     # ---- helpers -------------------------------------------------------
+
+    # Hydroponic range thresholds.  Green = inside optimal range,
+    # yellow/orange = within margin of the limit, red = outside acceptable.
+    # These are defaults for general hydroponics; adjust per crop/growth stage.
+    static RANGES = {
+        "pH":   {"min": 5.8,  "max": 6.2,  "margin": 0.1},
+        "EC":   {"min": 1000, "max": 2500, "margin": 200},
+        "TDS":  {"min": 500,  "max": 1250, "margin": 100},
+        "ORP":  {"min": 250,  "max": 450,  "margin": 50},
+        "Cl":   {"min": 0,    "max": 0.5,  "margin": 0.2},
+        "Temp": {"min": 20,   "max": 25,   "margin": 2}
+    }
+
+    def _range_color(v, r)
+        if v < r["min"] - r["margin"] || v > r["max"] + r["margin"]
+            return "red"
+        elif v < r["min"] || v > r["max"]
+            return "orange"
+        else
+            return "green"
+        end
+    end
+
+    def _colored_val(fmt, value, key)
+        import string
+        var c = self._range_color(value, self.RANGES[key])
+        return string.format("<span style='color:" + c + "'>" + fmt + "</span>", value)
+    end
 
     def _mac_arg()
         var m = self.mac
@@ -196,8 +236,13 @@ class YC01 : Driver
             log("YC01: BLEOp write session-start")
             tasmota.cmd("BLEOp1 M:" + m + " s:FF01 c:FF02 w:" + self._tx([1, 2, 0, 0, 0]) + " go")
         elif self.phase == 3
+            # The meter exposes the sensor payload on FF02.  The original
+            # working script for this meter used read+notify on the same
+            # characteristic, so we do the same and accept data from either
+            # the read response or a notification.  Keep-alive (k:60000)
+            # reuses the GATT connection between 50-second polls.
             log("YC01: BLEOp read+notify")
-            tasmota.cmd("BLEOp1 M:" + m + " s:FF01 c:FF02 n:FF02 r go")
+            tasmota.cmd("BLEOp1 M:" + m + " s:FF01 c:FF02 n:FF02 k:60000 r go")
         else                                        # phase 4: queued command writes
             if self.queue.size() == 0
                 if self.q_read
@@ -213,7 +258,7 @@ class YC01 : Driver
             var f = self.queue[0]
             self.queue.remove(0)
             log("YC01: BLEOp write " + f)
-            tasmota.cmd("BLEOp1 M:" + m + " s:FF01 c:FF02 w:" + f + " go")
+            tasmota.cmd("BLEOp1 M:" + m + " s:FF01 c:FF02 k:60000 w:" + f + " go")
         end
     end
 
@@ -257,6 +302,13 @@ class YC01 : Driver
                     self.queue = []
                     self.q_read = false
                     self._finish(false, v)
+                elif self.last_ok >= self.last_try
+                    # we already got sensor data during this operation; a late
+                    # notify timeout/read failure is not a real failure.
+                    log("YC01: BLE op reported " + v + " but data was already received")
+                    self.queue = []
+                    self.q_read = false
+                    self._finish(true, "")
                 elif self.phase == 4
                     self._issue()                   # skip failed write, drain queue
                 elif self.phase < 3
@@ -275,25 +327,65 @@ class YC01 : Driver
 
     # The BLE topic message contains BLEDevices and BLE stats.  Depending on
     # the exact Tasmota rule trigger, the devices map may arrive as the value
-    # (BLE#BLEDevices) or inside the full message (BLE).  Check both.
+    # (BLE#BLEDevices) or inside the full message (BLE).  It may also arrive
+    # as a raw JSON string, so try to parse that as well.
     def _on_ble_msg(v, msg)
-        var devices = nil
-        if v != nil && v.contains("BLEDevices")
-            devices = v["BLEDevices"]
-        elif msg != nil && msg.contains("BLEDevices")
-            devices = msg["BLEDevices"]
-        end
+        var devices = self._extract_devices(v)
+        if devices == nil   devices = self._extract_devices(msg)   end
         if devices != nil
             self.seen_adverts(devices)
         end
     end
 
+    def _extract_devices(x)
+        if x == nil   return nil   end
+        import json
+        var m = x
+        if type(m) == 'string'
+            try
+                m = json.load(m)
+            except .. as e
+                return nil
+            end
+        end
+        if type(m) != 'instance' && type(m) != 'map'   return nil   end
+        if m.contains("BLEDevices")
+            return m["BLEDevices"]
+        end
+        return nil
+    end
+
+    # Look for our MAC in the devices map.  Keys can be upper/lower case,
+    # with or without colons, and sometimes carry a type suffix like /0 or (0).
+    def _find_mac_key(v)
+        if v == nil   return nil   end
+        import string
+        var candidates = [self.mac_hex,
+                          string.tolower(self.mac_hex),
+                          string.replace(self.mac_hex, ":", ""),
+                          string.tolower(string.replace(self.mac_hex, ":", "")),
+                          self.mac_hex + "/0",
+                          self.mac_hex + "/1",
+                          self.mac_hex + "(0)",
+                          self.mac_hex + "(1)"]
+        for k : candidates
+            if v.contains(k)   return k   end
+        end
+        return nil
+    end
+
     def seen_adverts(v)
         if v == nil || self.mac_hex == ""   return   end
-        if v.contains(self.mac_hex)
+        var key = self._find_mac_key(v)
+        if key != nil
             self.last_seen = tasmota.millis() / 1000
-            var d = v[self.mac_hex]
-            if d != nil && d.contains('r')   self.rssi = d['r']   end
+            var d = v[key]
+            if d != nil && d.contains('r')
+                self.rssi = d['r']
+                log("YC01: beacon seen, RSSI=" + str(self.rssi) + " dBm")
+            else
+                log("YC01: beacon seen (no RSSI in advert)")
+            end
             if self.fails > 0
                 self.fails = 0
                 log("YC01: meter seen advertising again, backoff cleared")
@@ -392,7 +484,8 @@ class YC01 : Driver
         m["pH"]   = self.s16(d, 3) / 100.0
         m["EC"]   = self.s16(d, 5)
         m["TDS"]  = self.s16(d, 7)
-        m["ORP"]  = self.s16(d, 9)
+        self.orp_raw = self.s16(d, 9)
+        m["ORP"]  = self.orp_raw - self.orp_offset
         var cl = self.s16(d, 11)
         m["Cl"]   = (cl < 0 ? 0 : cl) / 10.0
         m["Temp"] = self.s16(d, 13) / 10.0
@@ -400,15 +493,27 @@ class YC01 : Driver
         if b < 0     b = 0   end
         if b > 100   b = 100 end
         m["Batt"] = int(b + 0.5)
-        # This meter firmware does not report SALT; keep the key so web_sensor
-        # stays happy but set it to 0.  EC is always raw uS/cm here.
-        m["SALT"] = 0
+        # Status byte at offset 17: high nibble is the hold flag.
+        self.hold = (d.size() > 17) && ((d[17] >> 4) != 0)
+        # SALT is not sent by the meter; derive it from EC using the same
+        # 0.55 factor the YINMIK app / Home Assistant integration uses.
         m["ECu"]  = "uS/cm"
+        m["SALT"] = self.s16(d, 5) * 0.55
         m["RSSI"] = self.rssi
         self.last = m
         import string
-        log(string.format("YC01: pH=%.2f EC=%i TDS=%i ORP=%imV Cl=%.1f T=%.1fC Batt=%i%% RSSI=%i",
-                          m["pH"], m["EC"], m["TDS"], m["ORP"], m["Cl"], m["Temp"], m["Batt"], self.rssi))
+        var orp_msg = string.format("ORP=%imV", m["ORP"])
+        if self.orp_offset != 0
+            orp_msg = orp_msg + string.format(" (raw %imV, offset %imV)", self.orp_raw, self.orp_offset)
+        end
+        var extra = ""
+        if self.hold   extra = extra + " HOLD"   end
+        if m["Batt"] < 60   extra = extra + " LOWBATT"   end
+        log(string.format("YC01: pH=%.2f EC=%i TDS=%i %s Cl=%.1f T=%.1fC Batt=%i%% RSSI=%i%s",
+                          m["pH"], m["EC"], m["TDS"], orp_msg, m["Cl"], m["Temp"], m["Batt"], self.rssi, extra))
+        if m["Batt"] < 60
+            log("YC01: WARNING - battery below 60%; meter may drop connections or give erratic readings", 2)
+        end
     end
 
     # type 0x02 calibration data frame (app parser, params 1..5)
@@ -458,6 +563,27 @@ class YC01 : Driver
     def cmd_buzzer(on)    self.send_payload([1, 4, on ? 0 : 1], false) end
     def cmd_calreq()      self.send_payload([2, 4, 0], true)         end
     def cmd_calapply()    self.send_payload([1, 0x13, 1, 0, 0, 0, 0], false) end
+
+    # Set ORP calibration offset.  expected_mV is the value you see on the
+    # meter's own display / app.  The driver subtracts (raw - expected) from
+    # future raw ORP readings so the displayed value matches the meter.
+    # Run without arguments to clear the offset.
+    def cmd_orpcal(expected_mV)
+        import string
+        if expected_mV == nil
+            self.orp_offset = 0
+            log("YC01: ORP calibration offset cleared")
+            return
+        end
+        if self.orp_raw == 0 && self.last.size() == 0
+            log("YC01: no ORP reading yet; read the meter first (yc01read)", 2)
+            return
+        end
+        var raw = (self.last.size() > 0) ? self.last["ORP"] + self.orp_offset : self.orp_raw
+        self.orp_offset = raw - expected_mV
+        log(string.format("YC01: ORP calibrated to %i mV (raw %i mV, offset %i mV)",
+                          expected_mV, raw, self.orp_offset))
+    end
 
     # Tasmota defaults to passive BLE scan.  The YINMIK app uses active scan
     # (Android SCAN_MODE active), so enabling active scan can help find the
@@ -519,6 +645,7 @@ class YC01 : Driver
 
     def every_second()
         # Enable active scan once BLE is up (driver init runs before BLE starts).
+        # WaterQualityApp uses SCAN_MODE_LOW_LATENCY (active); this matches it.
         if !self.scan_init && tasmota.millis() > 10000
             self.cmd_active_scan(true)
             self.scan_init = true
@@ -552,43 +679,62 @@ class YC01 : Driver
         tasmota.response_append(',"YC01":' + json.dump(self.last))
     end
 
-    # web_send_decimal wraps printf-style formatting, so any literal '%'
-    # in our already-formatted strings must be doubled or the page crashes.
+    # Send a pre-formatted sensor row to the Tasmota web UI.  All values are
+    # already substituted by string.format(), so no further escaping is needed.
     def _ws(s)
-        import string
-        tasmota.web_send_decimal(string.replace(s, "%", "%%"))
+        tasmota.web_send_decimal(s)
     end
 
     def web_sensor()
         try
             import string
             # Always show driver state so the page tells us why values are missing.
-            var now = tasmota.millis() / 1000
-            var state = self.awaiting ? ("busy (phase " + str(self.phase) + ")") : "idle"
-            self._ws("{s}YC01 driver{m}" + state + "{e}")
-            self._ws(string.format("{s}Fails{m}%i{e}", self.fails))
-            if self.last_seen < 0
-                self._ws("{s}YC01 beacon{m}never seen{e}")
-            else
-                self._ws(string.format("{s}YC01 beacon last seen{m}%i s ago{e}", now - self.last_seen))
-            end
             if self.last.size() == 0
-                self._ws("{s}YC01{m}waiting for first read...{e}")
-            else
-                self._ws(string.format("{s}pH{m}%.2f{e}",                 self.last["pH"]))
-                self._ws(string.format("{s}EC (%s){m}%.1f{e}",            self.last["ECu"], self.last["EC"]))
-                self._ws(string.format("{s}TDS{m}%.1f ppm{e}",            self.last["TDS"]))
-                self._ws(string.format("{s}SALT{m}%.1f{e}",               self.last["SALT"]))
-                self._ws(string.format("{s}ORP{m}%.2f{e}",                self.last["ORP"]))
-                self._ws(string.format("{s}Chlorine{m}%.2f mg/L{e}",      self.last["Cl"]))
-                self._ws(string.format("{s}Temperature{m}%.1f &deg;C{e}", self.last["Temp"]))
-                self._ws(string.format("{s}Battery{m}%i %%{e}",           self.last["Batt"]))
-                var age = self._age()
-                var stale = (age < 0 || age > self.poll_s * 2.5)
-                self._ws(string.format("{s}Last update{m}%i s ago%s{e}",
-                                         (age < 0) ? 0 : age, stale ? " (STALE)" : ""))
-                self._ws(string.format("{s}RSSI{m}%i dBm{e}",             self.rssi))
+                self._ws("{s}Status{m}Not connected{e}")
+                return
             end
+            var state
+            if !self.awaiting
+                state = "Waiting"
+            elif self.phase == 1
+                state = "Time sync"
+            elif self.phase == 2
+                state = "Starting"
+            elif self.phase == 3
+                state = "Reading"
+            elif self.phase == 4
+                state = "Executing"
+            else
+                state = "busy (phase " + str(self.phase) + ")"
+            end
+            if self.hold
+                state = state + " (HOLD)"
+            end
+            self._ws("{s}Status{m}" + state + "{e}")
+            self._ws(string.format("{s}pH{m}%s{e}",                  self._colored_val("%.2f", self.last["pH"],   "pH")))
+            self._ws(string.format("{s}EC (%s){m}%s{e}",              self.last["ECu"], self._colored_val("%.1f", self.last["EC"],  "EC")))
+            self._ws(string.format("{s}TDS{m}%s ppm{e}",             self._colored_val("%.1f", self.last["TDS"],  "TDS")))
+            self._ws(string.format("{s}SALT{m}%.1f ppm{e}",          self.last["SALT"]))
+            self._ws(string.format("{s}ORP{m}%s{e}",                 self._colored_val("%.2f", self.last["ORP"],  "ORP")))
+            if self.orp_offset != 0
+                self._ws(string.format("{s}ORP raw{m}%i{e}",           self.orp_raw))
+                self._ws(string.format("{s}ORP offset{m}%i{e}",        self.orp_offset))
+            end
+            self._ws(string.format("{s}Chlorine{m}%s mg/L{e}",       self._colored_val("%.2f", self.last["Cl"],   "Cl")))
+            self._ws(string.format("{s}Temperature{m}%s &deg;C{e}",  self._colored_val("%.1f", self.last["Temp"], "Temp")))
+            var batt_txt = string.format("%i", self.last["Batt"]) + " ％"
+            if self.last["Batt"] < 60
+                batt_txt = "<span style='color:red'>" + batt_txt + "</span>"
+            end
+            self._ws(string.format("{s}Battery{m}%s{e}", batt_txt))
+            var age = self._age()
+            var overdue = (age > self.poll_s)
+            var age_disp = (age < 0) ? 0 : age
+            var age_txt = string.format("%i s ago", age_disp)
+            if overdue
+                age_txt = "<span style='color:red'>" + age_txt + "</span>"
+            end
+            self._ws(string.format("{s}Last update{m}%s{e}", age_txt))
             if self.cal.size() > 0
                 for k : self.cal.keys()
                     self._ws("{s}Cal " + k + "{m}" + self.cal[k] + "{e}")
@@ -600,7 +746,7 @@ class YC01 : Driver
     end
 end
 
-# addr_type defaults to 1 (random static) - required for a 41:.. MAC
+# addr_type defaults to 0 (public) - matches Tasmota scan display 414284588113(0)
 # default poll interval is 30 s (pass nil or omit to use default)
 yc01 = YC01("414284588113", nil)
 tasmota.add_driver(yc01)
@@ -671,6 +817,18 @@ def yc01calapply_cmd(cmd, idx, payload, payload_json)
 end
 tasmota.add_cmd("yc01calapply", yc01calapply_cmd)
 
+def yc01orpcal_cmd(cmd, idx, payload, payload_json)
+    var p = str(payload)
+    if p == ""
+        yc01.cmd_orpcal(nil)
+    else
+        yc01.cmd_orpcal(int(p))
+    end
+    tasmota.resp_cmnd_done()
+    return true
+end
+tasmota.add_cmd("yc01orpcal", yc01orpcal_cmd)
+
 def yc01limit_cmd(cmd, idx, payload, payload_json)
     import string
     var a = string.split(str(payload), " ")
@@ -713,7 +871,9 @@ def yc01info_cmd(cmd, idx, payload, payload_json)
     import json
     var m = {"devinfo": yc01.devinfo, "cal": yc01.cal,
              "last_seen": yc01.last_seen, "last_ok": yc01.last_ok,
-             "fails": yc01.fails, "rssi": yc01.rssi}
+             "fails": yc01.fails, "rssi": yc01.rssi,
+             "orp_raw": yc01.orp_raw, "orp_offset": yc01.orp_offset,
+             "hold": yc01.hold}
     tasmota.response_append(json.dump(m))
     return true
 end
