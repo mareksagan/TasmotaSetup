@@ -55,6 +55,9 @@
 #     disconnects can freeze the device).
 #======================================================================
 
+import persist
+import webserver
+
 class YC01 : Driver
     var mac, mac_hex, addr_type
     var poll_s
@@ -74,7 +77,7 @@ class YC01 : Driver
         self.mac = mac
         self.mac_hex = string.toupper(string.replace(mac, ":", ""))
         self.addr_type = (addr_type == nil) ? 0 : addr_type
-        self.poll_s = (poll_s == nil) ? 50 : poll_s
+        self.poll_s = (poll_s == nil) ? persist.find("yc01_poll", 50) : poll_s
         self.last = {}
         self.last_ok = -1
         self.last_seen = -1
@@ -104,6 +107,9 @@ class YC01 : Driver
         # inside the full BLE message.
         tasmota.add_rule("BLE#BLEDevices",        /v, t, m -> self.seen_adverts(v))
         tasmota.add_rule("BLE",                   /v, t, m -> self._on_ble_msg(v, m))
+        if tasmota.is_network_up()
+            self.web_add_handler()
+        end
         log(string.format("YC01: driver v3.5 started, MAC %s type %i poll %is",
                           self.mac, self.addr_type, self.poll_s))
         log("YC01: active scan will be enabled automatically in ~10 s")
@@ -120,7 +126,9 @@ class YC01 : Driver
         "TDS":  {"min": 500,  "max": 1250, "margin": 100},
         "ORP":  {"min": 250,  "max": 450,  "margin": 50},
         "Cl":   {"min": 0,    "max": 0.5,  "margin": 0.2},
-        "Temp": {"min": 20,   "max": 25,   "margin": 2}
+        "Temp": {"min": 20,   "max": 25,   "margin": 2},
+        "SALT": {"min": 550,  "max": 1375, "margin": 110},
+        "Batt": {"min": 60,   "max": 100,  "margin": 30}
     }
 
     def _range_color(v, r)
@@ -137,6 +145,16 @@ class YC01 : Driver
         import string
         var c = self._range_color(value, self.RANGES[key])
         return string.format("<span style='color:" + c + "'>" + fmt + "</span>", value)
+    end
+
+    def _colored_val_unit(fmt, value, key, unit)
+        import string
+        var c = self._range_color(value, self.RANGES[key])
+        var txt = string.format(fmt, value)
+        if unit != nil && unit != ""
+            txt = txt + " " + unit
+        end
+        return "<span style='color:" + c + "'>" + txt + "</span>"
     end
 
     def _mac_arg()
@@ -606,6 +624,8 @@ class YC01 : Driver
         if s > 3600   s = 3600   end
         self.poll_s = s
         self.tick = 0
+        persist.yc01_poll = s
+        persist.save()
         log("YC01: poll interval set to " + str(s) + " s")
     end
 
@@ -685,6 +705,45 @@ class YC01 : Driver
         tasmota.web_send_decimal(s)
     end
 
+    # Web configuration page: register route and Configuration-menu button.
+    def web_add_handler()
+        webserver.on("/yc01", / -> self.page_yc01())
+    end
+
+    def web_add_config_button()
+        webserver.content_send("<p></p><form id=ac action='yc01' style='display: block;' method='get'><button>YC01 Settings</button></form>")
+    end
+
+    def page_yc01()
+        if !webserver.check_privileged_access()   return nil   end
+        if webserver.has_arg("save")
+            var newpoll = int(webserver.arg("poll"))
+            if newpoll < 10   newpoll = 10   end
+            if newpoll > 3600   newpoll = 3600   end
+            self.poll_s = newpoll
+            self.tick = 0
+            persist.yc01_poll = newpoll
+            persist.save()
+            webserver.redirect("/cn?")
+            return nil
+        end
+        var cur = self.poll_s
+        webserver.content_start("YC01")
+        webserver.content_send_style()
+        webserver.content_send(
+            "<fieldset><legend><b>&nbsp;YC01 Water Quality Monitor&nbsp;</b></legend>" +
+            "<form method='get' action='yc01'>" +
+            "<p></p><table>" +
+            "<tr><td style='width:200px'><b>Poll interval (seconds)</b></td>" +
+            "<td style='width:100px'><input id='poll' name='poll' type='number' min='10' max='3600' value='" + str(cur) + "'></td></tr>" +
+            "</table><p></p>" +
+            "<button name='save' type='submit' class='button bgrn'>Save</button>" +
+            "</form></fieldset>"
+        )
+        webserver.content_button(webserver.BUTTON_CONFIGURATION)
+        webserver.content_stop()
+    end
+
     def web_sensor()
         try
             import string
@@ -719,22 +778,18 @@ class YC01 : Driver
                 delay_txt = "<span style='color:red'>" + delay_txt + "</span>"
             end
             self._ws(string.format("{s}Sync delay{m}%s{e}", delay_txt))
-            var batt_txt = string.format("%i", self.last["Batt"]) + " ％"
-            if self.last["Batt"] < 60
-                batt_txt = "<span style='color:red'>" + batt_txt + "</span>"
-            end
-            self._ws(string.format("{s}Battery{m}%s{e}", batt_txt))
+            self._ws(string.format("{s}Battery{m}%s{e}", self._colored_val_unit("%.0f", self.last["Batt"], "Batt", "％")))
             self._ws(string.format("{s}pH{m}%s{e}",                  self._colored_val("%.2f", self.last["pH"],   "pH")))
-            self._ws(string.format("{s}EC{m}%s %s{e}",              self._colored_val("%.1f", self.last["EC"],  "EC"), self.last["ECu"]))
-            self._ws(string.format("{s}TDS{m}%s ppm{e}",             self._colored_val("%.1f", self.last["TDS"],  "TDS")))
-            self._ws(string.format("{s}SALT{m}%.1f ppm{e}",          self.last["SALT"]))
-            self._ws(string.format("{s}ORP{m}%s{e}",                 self._colored_val("%.2f", self.last["ORP"],  "ORP")))
+            self._ws(string.format("{s}EC{m}%s{e}",                  self._colored_val_unit("%.1f", self.last["EC"],  "EC", self.last["ECu"])))
+            self._ws(string.format("{s}TDS{m}%s{e}",                 self._colored_val_unit("%.1f", self.last["TDS"], "TDS", "ppm")))
+            self._ws(string.format("{s}SALT{m}%s{e}",                self._colored_val_unit("%.1f", self.last["SALT"], "SALT", "ppm")))
+            self._ws(string.format("{s}ORP{m}%s{e}",                 self._colored_val_unit("%.2f", self.last["ORP"], "ORP", "mV")))
             if self.orp_offset != 0
                 self._ws(string.format("{s}ORP raw{m}%i{e}",           self.orp_raw))
                 self._ws(string.format("{s}ORP offset{m}%i{e}",        self.orp_offset))
             end
-            self._ws(string.format("{s}Chlorine{m}%s mg/L{e}",       self._colored_val("%.2f", self.last["Cl"],   "Cl")))
-            self._ws(string.format("{s}Temperature{m}%s &deg;C{e}",  self._colored_val("%.1f", self.last["Temp"], "Temp")))
+            self._ws(string.format("{s}Chlorine{m}%s{e}",            self._colored_val_unit("%.2f", self.last["Cl"],   "Cl", "mg/L")))
+            self._ws(string.format("{s}Temperature{m}%s{e}",         self._colored_val_unit("%.1f", self.last["Temp"], "Temp", "&deg;C")))
             if self.cal.size() > 0
                 for k : self.cal.keys()
                     self._ws("{s}Cal " + k + "{m}" + self.cal[k] + "{e}")
