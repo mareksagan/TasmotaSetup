@@ -58,12 +58,22 @@
 import persist
 import webserver
 
+# Pre-computed HTML span tags for range colors.  Avoids string concat in
+# the web_sensor() hot path (called on every web UI refresh).
+var _SPAN_G = "<span style='color:green'>"
+var _SPAN_O = "<span style='color:orange'>"
+var _SPAN_R = "<span style='color:red'>"
+var _SPAN_X = "</span>"
+var _S = "{s}"
+var _M = "{m}"
+var _E = "{e}"
+
 class YC01 : Driver
     var mac, mac_hex, addr_type
-    var poll_s
+    var poll_s, sync_max
     var last, last_ok, last_seen, rssi
     var tick, awaiting, watchdog, phase
-    var fails, last_try, last_opp
+    var fails, last_try, last_opp, last_forced_reconnect
     var do_init, do_sync, last_sync
     var queue, q_read
     var cal, devinfo
@@ -71,6 +81,13 @@ class YC01 : Driver
     var hold
     var scan_init
     var profile_name, ranges
+    var _gr_cache
+    var _mac_arg_cache
+    var _profile_file_cache
+    var _profile_names_cache
+    var _parse_map
+    var _flat_mins, _flat_maxs, _flat_margins
+    var _persist_dirty, _persist_last_save
 
     # addr_type: 0 = public (default, matches Tasmota scan display), 1 = random.
     def init(mac, poll_s, addr_type)
@@ -85,8 +102,12 @@ class YC01 : Driver
         self.mac_hex = string.toupper(string.replace(mac, ":", ""))
         self.addr_type = addr_type
         self.poll_s = (poll_s == nil) ? persist.find("yc01_poll", 50) : poll_s
+        self.sync_max = persist.find("yc01_sync_max", 240)
+        if self.sync_max < 30   self.sync_max = 30   end
+        if self.sync_max > 3600   self.sync_max = 3600   end
         self.profile_name = persist.find("yc01_profile", "Generic")
-        self.ranges = nil                     # built lazily on first _range_color call
+        self._gr_cache = nil
+        self._load_profile(self.profile_name)  # builds flat arrays + ranges; file cached after
         self.last = {}
         self.last_ok = -1
         self.last_seen = -1
@@ -98,6 +119,7 @@ class YC01 : Driver
         self.fails = 0
         self.last_try = 0
         self.last_opp = 0
+        self.last_forced_reconnect = 0
         self.do_init = false                # simple read+notify works for this meter
         self.do_sync = false
         self.last_sync = 0
@@ -109,6 +131,12 @@ class YC01 : Driver
         self.orp_raw = 0                    # last raw ORP before offset
         self.hold = false                   # hold flag from status byte (offset 17)
         self.scan_init = false
+        self._mac_arg_cache = nil
+        self._profile_file_cache = nil
+        self._profile_names_cache = nil
+        self._parse_map = nil
+        self._persist_dirty = false
+        self._persist_last_save = 0
         tasmota.add_rule("BLEOperation#read",     /v, t, m -> self.got_data(v, m))
         tasmota.add_rule("BLEOperation#notify",   /v, t, m -> self.got_data(v, m))
         tasmota.add_rule("BLEOperation#state",    /v, t, m -> self.got_state(v, m))
@@ -134,16 +162,19 @@ class YC01 : Driver
     # Green = inside optimal range, orange = within margin of a limit, red = outside.
 
     def _generic_ranges()
-        return {
-            "pH":   {"min": 5.8,  "max": 6.2,  "margin": 0.1},
-            "EC":   {"min": 1000, "max": 2500, "margin": 200},
-            "TDS":  {"min": 640,  "max": 1600, "margin": 128},
-            "ORP":  {"min": 250,  "max": 400,  "margin": 50},
-            "Cl":   {"min": 0,    "max": 0.2,  "margin": 0.1},
-            "Temp": {"min": 20,   "max": 25,   "margin": 2},
-            "SALT": {"min": 0,    "max": 750,  "margin": 125},
-            "Batt": {"min": 60,   "max": 100,  "margin": 30}
-        }
+        if self._gr_cache == nil
+            self._gr_cache = {
+                "pH":   {"min": 5.8,  "max": 6.2,  "margin": 0.1},
+                "EC":   {"min": 1000, "max": 2500, "margin": 200},
+                "TDS":  {"min": 640,  "max": 1600, "margin": 128},
+                "ORP":  {"min": 300,  "max": 450,  "margin": 50},
+                "Cl":   {"min": 0,    "max": 0.2,  "margin": 0.1},
+                "Temp": {"min": 20,   "max": 25,   "margin": 2},
+                "SALT": {"min": 0,    "max": 750,  "margin": 125},
+                "Batt": {"min": 60,   "max": 100,  "margin": 30}
+            }
+        end
+        return self._gr_cache
     end
 
     # Profile table is stored in a separate UFS file (yc01_profiles.csv) so the
@@ -154,9 +185,13 @@ class YC01 : Driver
         return "yc01_profiles.csv"
     end
 
-    # Find the profile line matching 'name' by scanning the UFS file line-by-line.
-    # Returns nil if the file is missing or the profile is not found.
-    def _find_profile_line(name)
+    # Read the entire CSV file into a cached string.  Subsequent profile lookups
+    # and name listings work from this cache — zero file I/O after first read.
+    # Returns nil on error.  Cache persists until _invalidate_profile_cache().
+    def _read_profile_file()
+        if self._profile_file_cache != nil
+            return self._profile_file_cache
+        end
         import string
         var fname = self._profile_file()
         var f
@@ -166,27 +201,69 @@ class YC01 : Driver
             log("YC01: cannot open " + fname + ": " + str(e), 2)
             return nil
         end
-        var prefix = name + ","
-        var found = nil
         try
-            var line = f.readline()              # skip CSV header
-            line = f.readline()
-            while line != nil && line != ""
-                # strip trailing CR/LF
-                line = string.replace(line, "\r", "")
-                line = string.replace(line, "\n", "")
-                if line == ""   break   end
-                if string.find(line, prefix) == 0
-                    found = line
-                    break
-                end
-                line = f.readline()
-            end
+            self._profile_file_cache = f.read()
         except .. as e
             log("YC01: error reading " + fname + ": " + str(e), 2)
+            f.close()
+            return nil
         end
         f.close()
-        return found
+        return self._profile_file_cache
+    end
+
+    # Invalidate all profile caches (file content, name list).  Call after
+    # uploading a new CSV file.
+    def _invalidate_profile_cache()
+        self._profile_file_cache = nil
+        self._profile_names_cache = nil
+    end
+
+    # Find the profile line matching 'name' by scanning the cached file content.
+    # Returns nil if the file is missing or the profile is not found.
+    def _find_profile_line(name)
+        import string
+        var content = self._read_profile_file()
+        if content == nil   return nil   end
+        var prefix = name + ","
+        var lines = string.split(content, "\n")
+        for line : lines
+            if string.find(line, prefix) == 0
+                # strip trailing \r only
+                if size(line) > 0 && line[size(line)-1] == "\r"
+                    return line[0..size(line)-2]
+                end
+                return line
+            end
+        end
+        return nil
+    end
+
+    # Get all profile names from the cached file.  Returns a list of strings.
+    # Skip the CSV header line.  Result is cached for the lifetime of the driver.
+    def _get_profile_names()
+        if self._profile_names_cache != nil
+            return self._profile_names_cache
+        end
+        import string
+        var names = []
+        var content = self._read_profile_file()
+        if content != nil
+            var lines = string.split(content, "\n")
+            var first = true
+            for line : lines
+                if first
+                    first = false
+                    continue
+                end
+                var comma = string.find(line, ",")
+                if comma > 0
+                    names.push(line[0..comma-1])
+                end
+            end
+        end
+        self._profile_names_cache = names
+        return names
     end
 
     # Parse a CSV profile line into [name, ph_min, ph_max, ec_min, ec_max, t_min,
@@ -203,14 +280,35 @@ class YC01 : Driver
                 int(parts[10])]
     end
 
-    # Expand a compact profile line into the full range map used by _range_color().
-    # Generic is special: it defines the fallback ranges for Batt.
-    def _profile_ranges(name)
-        var generic = self._generic_ranges()
-        if name == "Generic"   return generic   end
-        var line = self._find_profile_line(name)
-        if line == nil   return generic   end
+    # Build flat arrays for fast range-color lookups.  Index order:
+    # 0=pH 1=EC 2=TDS 3=ORP 4=Cl 5=Temp 6=SALT 7=Batt
+    # Eliminates nested map creation and string-key hashing in _range_color().
+    def _build_flat_ranges(ph_min, ph_max, ec_min, ec_max, temp_min, temp_max,
+                           cl_max, orp_min, orp_max, salt_max)
+        var ec_margin = int((ec_max - ec_min) * 0.15 + 0.5)
+        if ec_margin < 50   ec_margin = 50   end
+        var tds_margin = int(ec_margin * 0.64)
+        if tds_margin < 32   tds_margin = 32   end
+        var cl_margin = cl_max * 0.5
+        var salt_margin = salt_max * 0.15
+        if salt_margin < 50   salt_margin = 50   end
+        self._flat_mins    = [ph_min, ec_min, int(ec_min * 0.64), orp_min, 0,         temp_min, 0,        60]
+        self._flat_maxs    = [ph_max, ec_max, int(ec_max * 0.64), orp_max, cl_max,    temp_max, salt_max, 100]
+        self._flat_margins = [0.1,    ec_margin, tds_margin,       50,      cl_margin, 2,       int(salt_margin + 0.5), 30]
+    end
+
+    def _build_flat_generic()
+        self._flat_mins    = [5.8, 1000, 640,  300, 0,    20,  0,   60]
+        self._flat_maxs    = [6.2, 2500, 1600, 450, 0.2, 25,  750, 100]
+        self._flat_margins = [0.1, 200,  128,  50,  0.1, 2,   125, 30]
+    end
+
+    # Expand a compact profile line into the full range map and flat arrays.
+    def _profile_ranges_from_line(line)
         var p = self._parse_profile_line(line)
+        self._build_flat_ranges(p[1], p[2], p[3], p[4], p[5], p[6],
+                                p[7], p[8], p[9], p[10])
+        # Build the ranges map for backward compatibility
         var ph_min = p[1], ph_max = p[2], ec_min = p[3], ec_max = p[4]
         var temp_min = p[5], temp_max = p[6]
         var cl_max = p[7]
@@ -223,70 +321,78 @@ class YC01 : Driver
         var cl_margin = cl_max * 0.5
         var salt_margin = salt_max * 0.15
         if salt_margin < 50   salt_margin = 50   end
-        var r = {}
-        r["pH"]   = {"min": ph_min, "max": ph_max, "margin": 0.1}
-        r["EC"]   = {"min": ec_min, "max": ec_max, "margin": ec_margin}
-        # TDS ≈ EC × 0.64 for standard hydroponic nutrient solutions.
-        r["TDS"]  = {"min": int(ec_min * 0.64), "max": int(ec_max * 0.64), "margin": tds_margin}
-        r["Temp"] = {"min": temp_min, "max": temp_max, "margin": 2}
-        r["SALT"] = {"min": 0, "max": salt_max, "margin": int(salt_margin + 0.5)}
-        r["ORP"]  = {"min": orp_min, "max": orp_max, "margin": 50}
-        r["Cl"]   = {"min": 0, "max": cl_max, "margin": cl_margin}
-        # Battery is universal, not crop-specific.
-        r["Batt"] = generic["Batt"]
-        return r
+        return {
+            "pH":   {"min": ph_min, "max": ph_max, "margin": 0.1},
+            "EC":   {"min": ec_min, "max": ec_max, "margin": ec_margin},
+            "TDS":  {"min": int(ec_min * 0.64), "max": int(ec_max * 0.64), "margin": tds_margin},
+            "Temp": {"min": temp_min, "max": temp_max, "margin": 2},
+            "SALT": {"min": 0, "max": salt_max, "margin": int(salt_margin + 0.5)},
+            "ORP":  {"min": orp_min, "max": orp_max, "margin": 50},
+            "Cl":   {"min": 0, "max": cl_max, "margin": cl_margin},
+            "Batt": self._generic_ranges()["Batt"]
+        }
     end
 
     def _load_profile(name)
-        import string
         if name == nil   name = "Generic"   end
-        if name != "Generic"
-            if self._find_profile_line(name) == nil
-                name = "Generic"
-            end
+        if name == "Generic"
+            self.profile_name = "Generic"
+            self._build_flat_generic()
+            self.ranges = self._generic_ranges()
+            log("YC01: active profile: Generic")
+            return
+        end
+        var line = self._find_profile_line(name)
+        if line == nil
+            self.profile_name = "Generic"
+            self._build_flat_generic()
+            self.ranges = self._generic_ranges()
+            log("YC01: profile '" + name + "' not found, using Generic")
+            return
         end
         self.profile_name = name
-        self.ranges = self._profile_ranges(name)
+        self.ranges = self._profile_ranges_from_line(line)
         log("YC01: active profile: " + name)
     end
 
+    # Flat-array range color lookup.  No map creation, no string hashing — just
+    # array indexing and arithmetic.  Called 8× per web_sensor() render.
     def _range_color(v, key)
-        if self.ranges == nil
-            self._load_profile(self.profile_name)
+        var i = -1
+        if key == "pH"    i = 0
+        elif key == "EC"   i = 1
+        elif key == "TDS"  i = 2
+        elif key == "ORP"  i = 3
+        elif key == "Cl"   i = 4
+        elif key == "Temp" i = 5
+        elif key == "SALT" i = 6
+        elif key == "Batt" i = 7
         end
-        if !self.ranges.contains(key)   return "green"   end
-        var r = self.ranges[key]
-        if v < r["min"] - r["margin"] || v > r["max"] + r["margin"]
+        if i < 0   return "green"   end
+        var mn = self._flat_mins[i]
+        var mx = self._flat_maxs[i]
+        var mg = self._flat_margins[i]
+        if v < mn - mg || v > mx + mg
             return "red"
-        elif v < r["min"] || v > r["max"]
+        elif v < mn || v > mx
             return "orange"
-        else
-            return "green"
         end
+        return "green"
     end
 
-    def _colored_val(fmt, value, key)
-        import string
-        var c = self._range_color(value, key)
-        return string.format("<span style='color:" + c + "'>" + fmt + "</span>", value)
-    end
+    # NOTE: _colored_val and _colored_val_unit are intentionally removed.
+    # Their logic is inlined in web_sensor() for maximum performance.
 
-    def _colored_val_unit(fmt, value, key, unit)
-        import string
-        var c = self._range_color(value, key)
-        var txt = string.format(fmt, value)
-        if unit != nil && unit != ""
-            txt = txt + " " + unit
-        end
-        return "<span style='color:" + c + "'>" + txt + "</span>"
-    end
-
+    # Returns "MAC" or "MAC/addr_type".  Cached — MAC rarely changes.
     def _mac_arg()
-        var m = self.mac
-        if self.addr_type != nil && self.addr_type != 0
-            m = m + "/" + str(self.addr_type)
+        if self._mac_arg_cache == nil
+            var m = self.mac
+            if self.addr_type != nil && self.addr_type != 0
+                m = m + "/" + str(self.addr_type)
+            end
+            self._mac_arg_cache = m
         end
-        return m
+        return self._mac_arg_cache
     end
 
     def _set_mac(mac, addr_type)
@@ -310,11 +416,19 @@ class YC01 : Driver
         self.mac = mac
         self.mac_hex = mac
         self.addr_type = (addr_type == nil) ? 0 : int(addr_type)
+        self._mac_arg_cache = nil
         persist.yc01_mac = self.mac
         persist.yc01_addr_type = self.addr_type
-        persist.save()
+        self._persist_mark_dirty()
         log(string.format("YC01: MAC set to %s type %i", self.mac, self.addr_type))
         return true
+    end
+
+    # Mark persist state as dirty; actual flash write is debounced to at most
+    # one per 5 s in every_second().  Avoids multiple flash writes when several
+    # settings change in quick succession.
+    def _persist_mark_dirty()
+        self._persist_dirty = true
     end
 
     def _is_ours(msg)
@@ -438,6 +552,7 @@ class YC01 : Driver
         if ok
             self.fails = 0
             self.last_ok = tasmota.millis() / 1000
+            self.last_forced_reconnect = 0
         else
             self.fails += 1
             import string
@@ -529,11 +644,9 @@ class YC01 : Driver
     # with or without colons, and sometimes carry a type suffix like /0 or (0).
     def _find_mac_key(v)
         if v == nil   return nil   end
-        import string
+        # mac_hex is already upper-cased and de-colonized in init(); only
+        # suffix variants are needed.
         var candidates = [self.mac_hex,
-                          string.tolower(self.mac_hex),
-                          string.replace(self.mac_hex, ":", ""),
-                          string.tolower(string.replace(self.mac_hex, ":", "")),
                           self.mac_hex + "/0",
                           self.mac_hex + "/1",
                           self.mac_hex + "(0)",
@@ -650,7 +763,10 @@ class YC01 : Driver
     # Frame layout (after decode): type=1, sub=2, model=15, then BE u16/s16
     # values at offsets 3..15.
     def parse(d, flags)
-        var m = {}
+        if self._parse_map == nil
+            self._parse_map = {"pH":0,"EC":0,"TDS":0,"ORP":0,"Cl":0,"Temp":0,"Batt":0,"ECu":"","SALT":0,"RSSI":0}
+        end
+        var m = self._parse_map
         m["pH"]   = self.s16(d, 3) / 100.0
         m["EC"]   = self.s16(d, 5)
         m["TDS"]  = self.s16(d, 7)
@@ -777,8 +893,19 @@ class YC01 : Driver
         self.poll_s = s
         self.tick = 0
         persist.yc01_poll = s
-        persist.save()
+        self._persist_mark_dirty()
         log("YC01: poll interval set to " + str(s) + " s")
+    end
+
+    # Change the maximum allowed sync delay.  If the last successful read is
+    # older than this, the driver forces an immediate reconnect attempt.
+    def cmd_sync_max(s)
+        if s < 30   s = 30   end
+        if s > 3600   s = 3600   end
+        self.sync_max = s
+        persist.yc01_sync_max = s
+        self._persist_mark_dirty()
+        log("YC01: max sync delay set to " + str(s) + " s")
     end
 
     def cmd_calset(std)
@@ -816,9 +943,16 @@ class YC01 : Driver
     # ---- scheduling ------------------------------------------------------
 
     def every_second()
+        var now = tasmota.millis() / 1000    # single call per tick
+        # Flush dirty persist state (debounced flash writes)
+        if self._persist_dirty && (now - self._persist_last_save >= 5)
+            persist.save()
+            self._persist_dirty = false
+            self._persist_last_save = now
+        end
         # Enable active scan once BLE is up (driver init runs before BLE starts).
         # WaterQualityApp uses SCAN_MODE_LOW_LATENCY (active); this matches it.
-        if !self.scan_init && tasmota.millis() > 10000
+        if !self.scan_init && now > 10
             self.cmd_active_scan(true)
             self.scan_init = true
         end
@@ -831,6 +965,29 @@ class YC01 : Driver
             end
             return
         end
+        # If the last successful read is older than the configured maximum sync
+        # delay, try to recover instead of waiting for the next scheduled poll.
+        # Rate-limit these recovery attempts to once every 120 s.  If the meter
+        # has not been seen advertising recently, run an active scan rather than
+        # hammering a connect() against a sleeping/offline device.
+        if self.last_ok >= 0
+            var age = now - self.last_ok
+            if age > self.sync_max
+                if now - self.last_forced_reconnect >= 120
+                    self.last_forced_reconnect = now
+                    import string
+                    var beacon_age = (self.last_seen < 0) ? 9999 : now - self.last_seen
+                    if beacon_age > 120
+                        log(string.format("YC01: sync delay %is exceeds max %is and beacon not seen for %is, running active scan", age, self.sync_max, beacon_age), 2)
+                        self.cmd_find()
+                    else
+                        log(string.format("YC01: sync delay %is exceeds max %is, forcing reconnect", age, self.sync_max), 2)
+                        self._start(true)
+                    end
+                    return
+                end
+            end
+        end
         self.tick += 1
         if self.tick >= self.poll_s
             self.tick = 0
@@ -840,21 +997,11 @@ class YC01 : Driver
 
     # ---- presentation ----------------------------------------------------
 
-    def _age()
-        if self.last_ok < 0   return -1   end
-        return tasmota.millis() / 1000 - self.last_ok
-    end
-
     def json_append()
         if self.last.size() == 0   return end
         import json
-        tasmota.response_append(',"YC01":' + json.dump(self.last))
-    end
-
-    # Send a pre-formatted sensor row to the Tasmota web UI.  All values are
-    # already substituted by string.format(), so no further escaping is needed.
-    def _ws(s)
-        tasmota.web_send_decimal(s)
+        tasmota.response_append(',"YC01":')
+        tasmota.response_append(json.dump(self.last))
     end
 
     # Web configuration page: register route and Configuration-menu button.
@@ -863,7 +1010,7 @@ class YC01 : Driver
     end
 
     def web_add_config_button()
-        webserver.content_send("<p></p><form id=ac action='yc01' style='display: block;' method='get'><button>YC01 Settings</button></form>")
+        webserver.content_send("<p></p><form id=ac action='yc01' style='display: block;' method='get'><button>Hydroponics</button></form>")
     end
 
     def page_yc01()
@@ -875,27 +1022,36 @@ class YC01 : Driver
             self.poll_s = newpoll
             self.tick = 0
             persist.yc01_poll = newpoll
+            var newsync = int(webserver.arg("syncmax"))
+            if newsync < 30   newsync = 30   end
+            if newsync > 3600   newsync = 3600   end
+            self.sync_max = newsync
+            persist.yc01_sync_max = newsync
             self._set_mac(webserver.arg("mac"), webserver.arg("atype"))
             var newprofile = webserver.arg("profile")
             self._load_profile(newprofile)
             persist.yc01_profile = self.profile_name
-            persist.save()
+            self._persist_mark_dirty()
+            self._invalidate_profile_cache()
             webserver.redirect("/cn?")
             return nil
         end
         var cur = self.poll_s
+        var cur_sync = self.sync_max
         var cur_mac = self.mac
         var sel_pub = (self.addr_type == 0) ? " selected" : ""
         var sel_rnd = (self.addr_type == 1) ? " selected" : ""
         import string
-        webserver.content_start("YC01")
+        webserver.content_start("Hydroponics")
         webserver.content_send_style()
         webserver.content_send(
-            "<fieldset><legend><b>&nbsp;YC01 Water Quality Monitor&nbsp;</b></legend>" +
+            "<fieldset><legend><b>&nbsp;Hydroponics&nbsp;</b></legend>" +
             "<form method='get' action='yc01'>" +
             "<p></p><table>" +
             "<tr><td style='width:200px'><b>Poll interval (seconds)</b></td>" +
             "<td style='width:220px'><input id='poll' name='poll' type='number' min='10' max='3600' value='" + str(cur) + "'></td></tr>" +
+            "<tr><td style='width:200px'><b>Max sync delay (seconds)</b></td>" +
+            "<td style='width:220px'><input id='syncmax' name='syncmax' type='number' min='30' max='3600' value='" + str(cur_sync) + "'></td></tr>" +
             "<tr><td><b>Beacon MAC</b></td>" +
             "<td><input id='mac' name='mac' maxlength='17' value='" + cur_mac + "'></td></tr>" +
             "<tr><td><b>Address type</b></td>" +
@@ -906,39 +1062,16 @@ class YC01 : Driver
             "<tr><td><b>Profile</b></td>" +
             "<td><select id='profile' name='profile'>"
         )
-        # Stream profile options from the UFS file line-by-line.  Only one line
-        # is held in RAM at a time, so the settings page cannot exhaust the heap.
-        var fname = self._profile_file()
-        var f
-        try
-            f = open(fname, "r")
-        except .. as e
-            log("YC01: cannot open " + fname + ": " + str(e), 2)
-            f = nil
-        end
-        if f != nil
-            try
-                var line = f.readline()          # skip CSV header
-                line = f.readline()
-                while line != nil && line != ""
-                    line = string.replace(line, "\r", "")
-                    line = string.replace(line, "\n", "")
-                    if line == ""   break   end
-                    var comma = string.find(line, ",")
-                    if comma > 0
-                        var n = line[0..comma-1]
-                        var sel = (n == self.profile_name) ? " selected" : ""
-                        webserver.content_send("<option value='" + n + "'" + sel + ">" + n + "</option>")
-                    end
-                    line = f.readline()
-                end
-            except .. as e
-                log("YC01: error reading " + fname + " in page: " + str(e), 2)
-            end
-            f.close()
-        else
-            # Fallback if the profiles file has not been uploaded yet.
+        # Use cached profile names (file read once, cached in RAM).  Falls back
+        # to Generic if the file is missing or empty.
+        var names = self._get_profile_names()
+        if names.size() == 0
             webserver.content_send("<option value='Generic' selected>Generic</option>")
+        else
+            for n : names
+                var sel = (n == self.profile_name) ? " selected" : ""
+                webserver.content_send("<option value='" + n + "'" + sel + ">" + n + "</option>")
+            end
         end
         webserver.content_send(
             "</select></td></tr>" +
@@ -951,59 +1084,104 @@ class YC01 : Driver
     end
 
     def web_sensor()
-        try
-            import string
-            # Always show driver state so the page tells us why values are missing.
-            if self.last.size() == 0
-                self._ws("{s}Status{m}Not connected{e}")
-                return
-            end
-            var state
-            if !self.awaiting
-                state = "Waiting"
-            elif self.phase == 1
-                state = "Time sync"
-            elif self.phase == 2
-                state = "Starting"
-            elif self.phase == 3
-                state = "Reading"
-            elif self.phase == 4
-                state = "Executing"
-            else
-                state = "busy (phase " + str(self.phase) + ")"
-            end
-            if self.hold
-                state = state + " (HOLD)"
-            end
-            self._ws("{s}Status{m}" + state + "{e}")
-            var age = self._age()
-            var delay = age - self.poll_s
-            if delay < 0   delay = 0   end
-            var delay_txt = string.format("%i s", delay)
-            if delay > 0
-                delay_txt = "<span style='color:red'>" + delay_txt + "</span>"
-            end
-            self._ws(string.format("{s}Sync delay{m}%s{e}", delay_txt))
-            self._ws(string.format("{s}Battery{m}%s{e}", self._colored_val_unit("%.0f", self.last["Batt"], "Batt", "％")))
-            self._ws(string.format("{s}pH{m}%s{e}",                  self._colored_val("%.2f", self.last["pH"],   "pH")))
-            self._ws(string.format("{s}EC{m}%s{e}",                  self._colored_val_unit("%.1f", self.last["EC"],  "EC", self.last["ECu"])))
-            self._ws(string.format("{s}TDS{m}%s{e}",                 self._colored_val_unit("%.1f", self.last["TDS"], "TDS", "ppm")))
-            self._ws(string.format("{s}SALT{m}%s{e}",                self._colored_val_unit("%.1f", self.last["SALT"], "SALT", "ppm")))
-            self._ws(string.format("{s}ORP{m}%s{e}",                 self._colored_val_unit("%.2f", self.last["ORP"], "ORP", "mV")))
-            if self.orp_offset != 0
-                self._ws(string.format("{s}ORP raw{m}%i{e}",           self.orp_raw))
-                self._ws(string.format("{s}ORP offset{m}%i{e}",        self.orp_offset))
-            end
-            self._ws(string.format("{s}Chlorine{m}%s{e}",            self._colored_val_unit("%.2f", self.last["Cl"],   "Cl", "mg/L")))
-            self._ws(string.format("{s}Temperature{m}%s{e}",         self._colored_val_unit("%.1f", self.last["Temp"], "Temp", "&deg;C")))
-            if self.cal.size() > 0
-                for k : self.cal.keys()
-                    self._ws("{s}Cal " + k + "{m}" + self.cal[k] + "{e}")
-                end
-            end
-        except .. as e
-            log("YC01: web_sensor error: " + str(e), 2)
+        import string
+        if self.last.size() == 0
+            tasmota.web_send_decimal(_S + "Status" + _M + "Not connected" + _E)
+            return
         end
+        var now = tasmota.millis() / 1000
+        # State
+        var state
+        if !self.awaiting
+            state = "Waiting"
+        elif self.phase == 1
+            state = "Time sync"
+        elif self.phase == 2
+            state = "Starting"
+        elif self.phase == 3
+            var age = (self.last_ok >= 0) ? (now - self.last_ok) : -1
+            state = (age > self.sync_max) ? "Reconnecting" : "Reading"
+        elif self.phase == 4
+            state = "Executing"
+        else
+            state = "busy (phase " + str(self.phase) + ")"
+        end
+        if self.hold   state += " (HOLD)"   end
+        # Delay
+        var age = (self.last_ok >= 0) ? (now - self.last_ok) : -1
+        var delay = age - self.sync_max
+        if delay < 0   delay = 0   end
+        var delay_txt = string.format("%i s", delay)
+        if delay > 0   delay_txt = "<span style='color:red'>" + delay_txt + "</span>"   end
+        # Build output — inlined color + value formatting, zero function calls
+        var out = _S + "Status" + _M + state + _E +
+                  _S + "Sync delay" + _M + delay_txt + _E
+        # Batt (idx 7)
+        var v = self.last["Batt"]
+        var mn = self._flat_mins[7]
+        var mx = self._flat_maxs[7]
+        var mg = self._flat_margins[7]
+        var sp = (v < mn - mg || v > mx + mg) ? _SPAN_R : (v < mn || v > mx) ? _SPAN_O : _SPAN_G
+        out += _S + "Battery" + _M + sp + string.format("%.0f", v) + " ％" + _SPAN_X + _E
+        # pH (idx 0)
+        v = self.last["pH"]
+        mn = self._flat_mins[0]
+        mx = self._flat_maxs[0]
+        mg = self._flat_margins[0]
+        sp = (v < mn - mg || v > mx + mg) ? _SPAN_R : (v < mn || v > mx) ? _SPAN_O : _SPAN_G
+        out += _S + "pH" + _M + sp + string.format("%.2f", v) + _SPAN_X + _E
+        # EC (idx 1)
+        v = self.last["EC"]
+        mn = self._flat_mins[1]
+        mx = self._flat_maxs[1]
+        mg = self._flat_margins[1]
+        sp = (v < mn - mg || v > mx + mg) ? _SPAN_R : (v < mn || v > mx) ? _SPAN_O : _SPAN_G
+        out += _S + "EC" + _M + sp + string.format("%.1f", v) + " uS/cm" + _SPAN_X + _E
+        # TDS (idx 2)
+        v = self.last["TDS"]
+        mn = self._flat_mins[2]
+        mx = self._flat_maxs[2]
+        mg = self._flat_margins[2]
+        sp = (v < mn - mg || v > mx + mg) ? _SPAN_R : (v < mn || v > mx) ? _SPAN_O : _SPAN_G
+        out += _S + "TDS" + _M + sp + string.format("%.1f", v) + " ppm" + _SPAN_X + _E
+        # SALT (idx 6)
+        v = self.last["SALT"]
+        mn = self._flat_mins[6]
+        mx = self._flat_maxs[6]
+        mg = self._flat_margins[6]
+        sp = (v < mn - mg || v > mx + mg) ? _SPAN_R : (v < mn || v > mx) ? _SPAN_O : _SPAN_G
+        out += _S + "SALT" + _M + sp + string.format("%.1f", v) + " ppm" + _SPAN_X + _E
+        # ORP (idx 3)
+        v = self.last["ORP"]
+        mn = self._flat_mins[3]
+        mx = self._flat_maxs[3]
+        mg = self._flat_margins[3]
+        sp = (v < mn - mg || v > mx + mg) ? _SPAN_R : (v < mn || v > mx) ? _SPAN_O : _SPAN_G
+        out += _S + "ORP" + _M + sp + string.format("%.2f", v) + " mV" + _SPAN_X + _E
+        if self.orp_offset != 0
+            out += _S + "ORP raw" + _M + str(self.orp_raw) + _E +
+                   _S + "ORP offset" + _M + str(self.orp_offset) + _E
+        end
+        # Cl (idx 4)
+        v = self.last["Cl"]
+        mn = self._flat_mins[4]
+        mx = self._flat_maxs[4]
+        mg = self._flat_margins[4]
+        sp = (v < mn - mg || v > mx + mg) ? _SPAN_R : (v < mn || v > mx) ? _SPAN_O : _SPAN_G
+        out += _S + "Chlorine" + _M + sp + string.format("%.2f", v) + " mg/L" + _SPAN_X + _E
+        # Temp (idx 5)
+        v = self.last["Temp"]
+        mn = self._flat_mins[5]
+        mx = self._flat_maxs[5]
+        mg = self._flat_margins[5]
+        sp = (v < mn - mg || v > mx + mg) ? _SPAN_R : (v < mn || v > mx) ? _SPAN_O : _SPAN_G
+        out += _S + "Temperature" + _M + sp + string.format("%.1f", v) + " &deg;C" + _SPAN_X + _E
+        if self.cal.size() > 0
+            for k : self.cal.keys()
+                out += _S + "Cal " + k + _M + self.cal[k] + _E
+            end
+        end
+        tasmota.web_send_decimal(out)
     end
 end
 
@@ -1160,6 +1338,13 @@ def yc01poll_cmd(cmd, idx, payload, payload_json)
 end
 tasmota.add_cmd("yc01poll", yc01poll_cmd)
 
+def yc01syncmax_cmd(cmd, idx, payload, payload_json)
+    yc01.cmd_sync_max(int(payload))
+    tasmota.resp_cmnd_done()
+    return true
+end
+tasmota.add_cmd("yc01syncmax", yc01syncmax_cmd)
+
 def yc01profile_cmd(cmd, idx, payload, payload_json)
     var p = str(payload)
     if p == ""
@@ -1167,7 +1352,7 @@ def yc01profile_cmd(cmd, idx, payload, payload_json)
     else
         yc01._load_profile(p)
         persist.yc01_profile = yc01.profile_name
-        persist.save()
+        yc01._persist_mark_dirty()
     end
     tasmota.resp_cmnd_done()
     return true
