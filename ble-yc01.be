@@ -70,14 +70,23 @@ class YC01 : Driver
     var orp_offset, orp_raw
     var hold
     var scan_init
+    var profile_name, ranges
 
     # addr_type: 0 = public (default, matches Tasmota scan display), 1 = random.
     def init(mac, poll_s, addr_type)
         import string
+        if mac == nil
+            mac = persist.find("yc01_mac", "414284588113")
+        end
+        if addr_type == nil
+            addr_type = persist.find("yc01_addr_type", 0)
+        end
         self.mac = mac
         self.mac_hex = string.toupper(string.replace(mac, ":", ""))
-        self.addr_type = (addr_type == nil) ? 0 : addr_type
+        self.addr_type = addr_type
         self.poll_s = (poll_s == nil) ? persist.find("yc01_poll", 50) : poll_s
+        self.profile_name = persist.find("yc01_profile", "Generic")
+        self.ranges = nil                     # built lazily on first _range_color call
         self.last = {}
         self.last_ok = -1
         self.last_seen = -1
@@ -117,21 +126,136 @@ class YC01 : Driver
 
     # ---- helpers -------------------------------------------------------
 
-    # Hydroponic range thresholds.  Green = inside optimal range,
-    # yellow/orange = within margin of the limit, red = outside acceptable.
-    # These are defaults for general hydroponics; adjust per crop/growth stage.
-    static RANGES = {
-        "pH":   {"min": 5.8,  "max": 6.2,  "margin": 0.1},
-        "EC":   {"min": 1000, "max": 2500, "margin": 200},
-        "TDS":  {"min": 500,  "max": 1250, "margin": 100},
-        "ORP":  {"min": 250,  "max": 450,  "margin": 50},
-        "Cl":   {"min": 0,    "max": 0.5,  "margin": 0.2},
-        "Temp": {"min": 20,   "max": 25,   "margin": 2},
-        "SALT": {"min": 550,  "max": 1375, "margin": 110},
-        "Batt": {"min": 60,   "max": 100,  "margin": 30}
-    }
+    # Profile-based hydroponic range thresholds.
+    # Profiles are stored in yc01_profiles.csv as:
+    #   name,pH_min,pH_max,EC_min,EC_max,Temp_min,Temp_max,Cl_max,ORP_min,ORP_max,SALT_max
+    # Only the active profile is expanded into the full range map, so the Berry
+    # heap stays small on ESP32.
+    # Green = inside optimal range, orange = within margin of a limit, red = outside.
 
-    def _range_color(v, r)
+    def _generic_ranges()
+        return {
+            "pH":   {"min": 5.8,  "max": 6.2,  "margin": 0.1},
+            "EC":   {"min": 1000, "max": 2500, "margin": 200},
+            "TDS":  {"min": 640,  "max": 1600, "margin": 128},
+            "ORP":  {"min": 250,  "max": 400,  "margin": 50},
+            "Cl":   {"min": 0,    "max": 0.2,  "margin": 0.1},
+            "Temp": {"min": 20,   "max": 25,   "margin": 2},
+            "SALT": {"min": 0,    "max": 750,  "margin": 125},
+            "Batt": {"min": 60,   "max": 100,  "margin": 30}
+        }
+    end
+
+    # Profile table is stored in a separate UFS file (yc01_profiles.csv) so the
+    # driver itself stays small.  The settings page and profile lookup both read
+    # the file line-by-line; only one profile line is ever in Berry RAM at a time.
+
+    def _profile_file()
+        return "yc01_profiles.csv"
+    end
+
+    # Find the profile line matching 'name' by scanning the UFS file line-by-line.
+    # Returns nil if the file is missing or the profile is not found.
+    def _find_profile_line(name)
+        import string
+        var fname = self._profile_file()
+        var f
+        try
+            f = open(fname, "r")
+        except .. as e
+            log("YC01: cannot open " + fname + ": " + str(e), 2)
+            return nil
+        end
+        var prefix = name + ","
+        var found = nil
+        try
+            var line = f.readline()              # skip CSV header
+            line = f.readline()
+            while line != nil && line != ""
+                # strip trailing CR/LF
+                line = string.replace(line, "\r", "")
+                line = string.replace(line, "\n", "")
+                if line == ""   break   end
+                if string.find(line, prefix) == 0
+                    found = line
+                    break
+                end
+                line = f.readline()
+            end
+        except .. as e
+            log("YC01: error reading " + fname + ": " + str(e), 2)
+        end
+        f.close()
+        return found
+    end
+
+    # Parse a CSV profile line into [name, ph_min, ph_max, ec_min, ec_max, t_min,
+    # t_max, cl_max, orp_min, orp_max, salt_max].
+    def _parse_profile_line(line)
+        import string
+        var parts = string.split(line, ",")
+        return [parts[0],
+                real(parts[1]), real(parts[2]),
+                int(parts[3]), int(parts[4]),
+                int(parts[5]), int(parts[6]),
+                real(parts[7]),
+                int(parts[8]), int(parts[9]),
+                int(parts[10])]
+    end
+
+    # Expand a compact profile line into the full range map used by _range_color().
+    # Generic is special: it defines the fallback ranges for Batt.
+    def _profile_ranges(name)
+        var generic = self._generic_ranges()
+        if name == "Generic"   return generic   end
+        var line = self._find_profile_line(name)
+        if line == nil   return generic   end
+        var p = self._parse_profile_line(line)
+        var ph_min = p[1], ph_max = p[2], ec_min = p[3], ec_max = p[4]
+        var temp_min = p[5], temp_max = p[6]
+        var cl_max = p[7]
+        var orp_min = p[8], orp_max = p[9]
+        var salt_max = p[10]
+        var ec_margin = int((ec_max - ec_min) * 0.15 + 0.5)
+        if ec_margin < 50   ec_margin = 50   end
+        var tds_margin = int(ec_margin * 0.64)
+        if tds_margin < 32   tds_margin = 32   end
+        var cl_margin = cl_max * 0.5
+        var salt_margin = salt_max * 0.15
+        if salt_margin < 50   salt_margin = 50   end
+        var r = {}
+        r["pH"]   = {"min": ph_min, "max": ph_max, "margin": 0.1}
+        r["EC"]   = {"min": ec_min, "max": ec_max, "margin": ec_margin}
+        # TDS ≈ EC × 0.64 for standard hydroponic nutrient solutions.
+        r["TDS"]  = {"min": int(ec_min * 0.64), "max": int(ec_max * 0.64), "margin": tds_margin}
+        r["Temp"] = {"min": temp_min, "max": temp_max, "margin": 2}
+        r["SALT"] = {"min": 0, "max": salt_max, "margin": int(salt_margin + 0.5)}
+        r["ORP"]  = {"min": orp_min, "max": orp_max, "margin": 50}
+        r["Cl"]   = {"min": 0, "max": cl_max, "margin": cl_margin}
+        # Battery is universal, not crop-specific.
+        r["Batt"] = generic["Batt"]
+        return r
+    end
+
+    def _load_profile(name)
+        import string
+        if name == nil   name = "Generic"   end
+        if name != "Generic"
+            if self._find_profile_line(name) == nil
+                name = "Generic"
+            end
+        end
+        self.profile_name = name
+        self.ranges = self._profile_ranges(name)
+        log("YC01: active profile: " + name)
+    end
+
+    def _range_color(v, key)
+        if self.ranges == nil
+            self._load_profile(self.profile_name)
+        end
+        if !self.ranges.contains(key)   return "green"   end
+        var r = self.ranges[key]
         if v < r["min"] - r["margin"] || v > r["max"] + r["margin"]
             return "red"
         elif v < r["min"] || v > r["max"]
@@ -143,13 +267,13 @@ class YC01 : Driver
 
     def _colored_val(fmt, value, key)
         import string
-        var c = self._range_color(value, self.RANGES[key])
+        var c = self._range_color(value, key)
         return string.format("<span style='color:" + c + "'>" + fmt + "</span>", value)
     end
 
     def _colored_val_unit(fmt, value, key, unit)
         import string
-        var c = self._range_color(value, self.RANGES[key])
+        var c = self._range_color(value, key)
         var txt = string.format(fmt, value)
         if unit != nil && unit != ""
             txt = txt + " " + unit
@@ -163,6 +287,34 @@ class YC01 : Driver
             m = m + "/" + str(self.addr_type)
         end
         return m
+    end
+
+    def _set_mac(mac, addr_type)
+        import string
+        if mac == nil   mac = ""   end
+        mac = string.toupper(string.replace(str(mac), " ", ""))
+        mac = string.replace(mac, ":", "")
+        mac = string.replace(mac, "-", "")
+        if size(mac) != 12
+            log("YC01: invalid MAC, must be 12 hex digits", 2)
+            return false
+        end
+        # simple hex validation
+        for i : 0..size(mac)-1
+            var c = mac[i]
+            if (c < '0' || c > '9') && (c < 'A' || c > 'F')
+                log("YC01: invalid MAC, must be 12 hex digits", 2)
+                return false
+            end
+        end
+        self.mac = mac
+        self.mac_hex = mac
+        self.addr_type = (addr_type == nil) ? 0 : int(addr_type)
+        persist.yc01_mac = self.mac
+        persist.yc01_addr_type = self.addr_type
+        persist.save()
+        log(string.format("YC01: MAC set to %s type %i", self.mac, self.addr_type))
+        return true
     end
 
     def _is_ours(msg)
@@ -723,11 +875,19 @@ class YC01 : Driver
             self.poll_s = newpoll
             self.tick = 0
             persist.yc01_poll = newpoll
+            self._set_mac(webserver.arg("mac"), webserver.arg("atype"))
+            var newprofile = webserver.arg("profile")
+            self._load_profile(newprofile)
+            persist.yc01_profile = self.profile_name
             persist.save()
             webserver.redirect("/cn?")
             return nil
         end
         var cur = self.poll_s
+        var cur_mac = self.mac
+        var sel_pub = (self.addr_type == 0) ? " selected" : ""
+        var sel_rnd = (self.addr_type == 1) ? " selected" : ""
+        import string
         webserver.content_start("YC01")
         webserver.content_send_style()
         webserver.content_send(
@@ -735,7 +895,53 @@ class YC01 : Driver
             "<form method='get' action='yc01'>" +
             "<p></p><table>" +
             "<tr><td style='width:200px'><b>Poll interval (seconds)</b></td>" +
-            "<td style='width:100px'><input id='poll' name='poll' type='number' min='10' max='3600' value='" + str(cur) + "'></td></tr>" +
+            "<td style='width:220px'><input id='poll' name='poll' type='number' min='10' max='3600' value='" + str(cur) + "'></td></tr>" +
+            "<tr><td><b>Beacon MAC</b></td>" +
+            "<td><input id='mac' name='mac' maxlength='17' value='" + cur_mac + "'></td></tr>" +
+            "<tr><td><b>Address type</b></td>" +
+            "<td><select id='atype' name='atype'>" +
+            "<option value='0'" + sel_pub + ">Public (0)</option>" +
+            "<option value='1'" + sel_rnd + ">Random (1)</option>" +
+            "</select></td></tr>" +
+            "<tr><td><b>Profile</b></td>" +
+            "<td><select id='profile' name='profile'>"
+        )
+        # Stream profile options from the UFS file line-by-line.  Only one line
+        # is held in RAM at a time, so the settings page cannot exhaust the heap.
+        var fname = self._profile_file()
+        var f
+        try
+            f = open(fname, "r")
+        except .. as e
+            log("YC01: cannot open " + fname + ": " + str(e), 2)
+            f = nil
+        end
+        if f != nil
+            try
+                var line = f.readline()          # skip CSV header
+                line = f.readline()
+                while line != nil && line != ""
+                    line = string.replace(line, "\r", "")
+                    line = string.replace(line, "\n", "")
+                    if line == ""   break   end
+                    var comma = string.find(line, ",")
+                    if comma > 0
+                        var n = line[0..comma-1]
+                        var sel = (n == self.profile_name) ? " selected" : ""
+                        webserver.content_send("<option value='" + n + "'" + sel + ">" + n + "</option>")
+                    end
+                    line = f.readline()
+                end
+            except .. as e
+                log("YC01: error reading " + fname + " in page: " + str(e), 2)
+            end
+            f.close()
+        else
+            # Fallback if the profiles file has not been uploaded yet.
+            webserver.content_send("<option value='Generic' selected>Generic</option>")
+        end
+        webserver.content_send(
+            "</select></td></tr>" +
             "</table><p></p>" +
             "<button name='save' type='submit' class='button bgrn'>Save</button>" +
             "</form></fieldset>"
@@ -801,9 +1007,8 @@ class YC01 : Driver
     end
 end
 
-# addr_type defaults to 0 (public) - matches Tasmota scan display 414284588113(0)
-# default poll interval is 30 s (pass nil or omit to use default)
-yc01 = YC01("414284588113", nil)
+# Load MAC / poll interval from persist, or use defaults on first boot.
+yc01 = YC01(nil, nil)
 tasmota.add_driver(yc01)
 
 # ---- console commands ---------------------------------------------------
@@ -954,3 +1159,17 @@ def yc01poll_cmd(cmd, idx, payload, payload_json)
     return true
 end
 tasmota.add_cmd("yc01poll", yc01poll_cmd)
+
+def yc01profile_cmd(cmd, idx, payload, payload_json)
+    var p = str(payload)
+    if p == ""
+        log("YC01: active profile: " + yc01.profile_name)
+    else
+        yc01._load_profile(p)
+        persist.yc01_profile = yc01.profile_name
+        persist.save()
+    end
+    tasmota.resp_cmnd_done()
+    return true
+end
+tasmota.add_cmd("yc01profile", yc01profile_cmd)
