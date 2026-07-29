@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Generate profiles.bin and update _pf_names() in yc01.be from new_profiles.csv."""
+"""Generate profiles.bin and update _pf_names() in yc01.be from profiles.csv."""
 import struct
 import csv
 import re
 import sys
 
-CSV_FILE = "new_profiles.csv"
+CSV_FILE = "profiles.csv"
 BIN_FILE = "profiles.bin"
 BE_FILE = "yc01.be"
 
