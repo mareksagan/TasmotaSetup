@@ -1,6 +1,10 @@
 #======================================================================
 # yc01.be - BLE-YC01 (YIERYI / YINMIK 6-in-1 pool water monitor)
-#           v4.0 - lean, fast, resource-efficient
+#           v4.1 - lazy-loaded binary profiles, minimal memory
+#
+# Configuration:
+#   MAC address: change _PF_MAC to your meter's MAC
+#   Profiles file: profiles.bin (generated from new_profiles.csv)
 #
 # Protocol:
 #  * GATT: service 0xFF01, characteristic 0xFF02 for READ + WRITE.
@@ -14,34 +18,192 @@
 #      Batt = clamp(100*(s16(b[15..16])-1950)/1240, 0, 100)
 #      SALT = EC * 0.55
 #
+# Profile binary format (profiles.bin):
+#   Header: 2 bytes = num_profiles
+#   Records: 1 byte name_len + 40 bytes name + 17 × 4-byte int32 (val*100)
+#   Record size: 109 bytes
+#
 # Commands: yc01read, yc01start, yc01stop, yc01poll, yc01profile
 #======================================================================
 
 import persist
 import webserver
 
-# Profile data: "name:ph_min,ph_max,ec_min,ec_max,t_min,t_max,cl_max,orp_min,orp_max,salt_max;..."
-var _PROFILE_DATA = "Generic:5.8,6.2,1000,2500,20,25,0.2,300,450,750;Tomato:6.0,6.3,2000,3200,20,26,0.2,300,450,750;Cherry Tomato:6.0,6.3,1800,2800,20,26,0.2,300,450,750;Beefsteak Tomato:6.0,6.3,2000,3500,20,26,0.2,300,450,750;Roma Tomato:6.0,6.3,2000,3200,20,26,0.2,300,450,750;Heirloom Tomato:6.0,6.3,2000,3200,20,26,0.2,300,450,750;Strawberry:6.0,6.2,1400,2000,15,22,0.1,300,450,500;Basil:5.8,6.2,1200,1800,20,24,0.1,300,450,500;Mint:5.8,6.2,1200,1600,18,22,0.2,300,450,500;Lettuce:6.0,6.2,1200,2000,18,22,0.1,300,450,500;Butterhead Lettuce:6.0,6.2,1200,2000,18,22,0.1,300,450,500;Romaine Lettuce:6.0,6.2,1200,2000,18,22,0.1,300,450,500;Spinach:6.0,6.5,1200,1600,18,22,0.1,300,450,500;Cucumber:5.8,6.0,1600,2400,20,25,0.2,300,450,750;Bell Pepper:6.0,6.3,1600,2400,22,26,0.2,300,450,750;Jalapeno:6.0,6.3,1600,2600,22,27,0.2,300,450,750;Habanero:6.0,6.3,1600,2800,22,28,0.2,300,450,750;Cayenne:6.0,6.3,1600,2600,22,27,0.2,300,450,750;Arugula:6.0,6.2,1500,1800,18,22,0.2,300,450,500;Dill:5.8,6.2,1000,1400,18,22,0.2,300,450,500;Parsley:6.0,6.5,1000,1600,18,22,0.2,300,450,500;Cilantro:6.0,6.5,1000,1400,18,22,0.2,300,450,500;Chives:6.0,6.5,1000,1400,18,22,0.2,300,450,500;Kale:6.0,6.5,1200,1800,18,22,0.2,300,450,1000;Swiss Chard:6.0,6.5,1200,1600,18,22,0.2,300,450,1000;Oregano:6.0,6.5,1200,1800,18,22,0.2,300,450,750;Thyme:6.0,6.5,1000,1600,18,22,0.2,300,450,750;Rosemary:6.0,6.5,1200,1800,18,24,0.2,300,450,750;Sage:6.0,6.5,1000,1600,18,22,0.2,300,450,750;Lemon Balm:5.8,6.2,1000,1400,18,22,0.2,300,450,750;Chamomile:6.0,6.5,800,1200,18,22,0.2,300,450,750;Microgreens:5.8,6.2,500,900,18,22,0.1,300,450,400;Bush Beans:6.0,6.3,1400,2000,18,24,0.2,300,450,500;Pole Beans:6.0,6.3,1400,2200,18,24,0.2,300,450,500;Edamame:6.0,6.3,1400,2000,18,24,0.2,300,450,750;Eggplant:6.0,6.3,1600,2400,22,26,0.2,300,450,750;Zucchini:6.0,6.3,1600,2400,20,25,0.2,300,450,750;Cantaloupe:6.0,6.3,1600,2400,22,26,0.2,300,450,750;Honeydew:6.0,6.3,1600,2400,22,26,0.2,300,450,750;Watermelon:6.0,6.3,1600,2400,22,26,0.2,300,450,750;Okra:6.0,6.5,1400,2200,22,28,0.2,300,450,750;Tomato + Basil (Companion):5.8,6.2,1400,2200,20,26,0.2,300,450,750;Lettuce + Spinach + Arugula:5.8,6.2,1200,1800,18,22,0.1,300,450,500;Bell Pepper + Eggplant:6.0,6.3,1600,2400,22,26,0.2,300,450,750;Rosemary + Thyme + Oregano:6.0,6.5,1200,1800,18,22,0.2,300,450,750;Bush Beans + Edamame:6.0,6.3,1400,2000,18,24,0.2,300,450,500;Cantaloupe + Honeydew + Watermelon:6.0,6.3,1600,2400,22,26,0.2,300,450,750;Zucchini + Summer Squash:6.0,6.3,1600,2400,20,25,0.2,300,450,750;Bok Choy + Tatsoi + Komatsuna:6.0,6.2,1000,1400,18,22,0.1,300,450,500;Endive + Escarole + Frisee:6.0,6.2,1000,1400,18,22,0.1,300,450,500;Tomato + Bell Pepper + Eggplant:6.0,6.3,1800,2600,20,26,0.2,300,450,750"
+var _PF_COUNT = 0
+var _PF_FNAME = "profiles.bin"
+var _PF_MAC = "414284588113"  # <-- change this to your meter's MAC
 
-# Profile lookup: name -> [ph_min, ph_max, ec_min, ec_max, t_min, t_max, cl_max, orp_min, orp_max, salt_max]
-var _PFL = {}
-
-def _pfl_build()
-    if size(_PFL) > 0   return   end
-    import string
-    var d = _PROFILE_DATA
-    var pos = 0
-    var dlen = size(d)
-    while pos < dlen
-        var c = string.find(d, ":", pos)
-        if c < 0   break   end
-        var s = string.find(d, ";", c)
-        if s < 0   s = dlen   end
-        var name = d[pos..c-1]
-        var vals = string.split(d[c+1..s-1], ",")
-        _PFL[name] = [real(vals[0]), real(vals[1]), int(vals[2]), int(vals[3]), int(vals[4]), int(vals[5]), real(vals[6]), int(vals[7]), int(vals[8]), int(vals[9])]
-        pos = s + 1
+# ---- profile file helpers ----
+def _pf_open()
+    var f
+    try
+        f = open(_PF_FNAME, "r")
+    except ..
+        return nil
     end
+    return f
+end
+
+def _pf_count()
+    if _PF_COUNT > 0   return _PF_COUNT   end
+    var f = _pf_open()
+    if f == nil   return 0   end
+    var h = f.read(2)
+    _PF_COUNT = int(h[0]) + (int(h[1]) << 8)
+    f.close()
+    return _PF_COUNT
+end
+
+def _pf_find(name)
+    var cnt = _pf_count()
+    var f = _pf_open()
+    if f == nil   return nil   end
+    var name_bytes = bytes(name)
+    var name_len = size(name)
+    for i : 0..cnt-1
+        f.seek(2 + i * 109)
+        var rec = f.read(109)
+        if size(rec) < 109   break   end
+        var nl = int(rec[0])
+        if nl == name_len
+            var match = true
+            for j : 0..nl-1
+                if int(rec[1+j]) != int(name_bytes[j])
+                    match = false
+                    break
+                end
+            end
+            if match
+                f.close()
+                var vals = []
+                var pos = 41
+                for k : 0..16
+                    var b0 = int(rec[pos])
+                    var b1 = int(rec[pos+1])
+                    var b2 = int(rec[pos+2])
+                    var b3 = int(rec[pos+3])
+                    var iv = b0 + (b1 << 8) + (b2 << 16) + (b3 << 24)
+                    if iv > 2147483647   iv -= 4294967296   end
+                    vals.push(iv / 100.0)
+                    pos += 4
+                end
+                return vals
+            end
+        end
+    end
+    f.close()
+    return nil
+end
+
+def _pf_names()
+    return [
+        "Generic",
+        "CherryTomato",
+        "BeefsteakTomato",
+        "BellPepper_Poblano_BananaPepper",
+        "ChiliPepper_Jalapeno_Cayenne",
+        "Habanero",
+        "Eggplant",
+        "Okra",
+        "BushBeans",
+        "PoleBeans",
+        "Peas_SnowPeas_SugarSnapPeas",
+        "Edamame",
+        "Cantaloupe_HoneydewMelon_MiniWatermelon",
+        "Strawberry_EverbearingStrawberry_AlpineStrawberry",
+        "Lettuce_ButterheadLettuce_RomaineLettuce",
+        "Spinach_NewZealandSpinach",
+        "Kale_CollardGreens",
+        "Arugula",
+        "Endive_Escarole_Frisee_Radicchio",
+        "Mache",
+        "Microgreens",
+        "BokChoy_Senposai_YukinaSavoy",
+        "Tatsoi_Komatsuna_Mibuna",
+        "MustardGreens",
+        "Mizuna",
+        "Watercress",
+        "Amaranth",
+        "MalabarSpinach",
+        "Purslane",
+        "Sorrel",
+        "Celtuce",
+        "SweetPotatoVine",
+        "GarlicChives",
+        "Basil_ThaiBasil_HolyBasil",
+        "Parsley",
+        "Cilantro",
+        "Dill",
+        "Mint_Peppermint_Spearmint",
+        "Chives",
+        "Oregano",
+        "Thyme_Sage_Tarragon_Marjoram",
+        "Rosemary_BayLaurel",
+        "LemonBalm",
+        "Lemongrass",
+        "Stevia",
+        "Shiso",
+        "VietnameseCoriander",
+        "Culantro",
+        "Epazote",
+        "Lovage",
+        "SummerSavory",
+        "WinterSavory",
+        "Lavender",
+        "Chamomile",
+        "Feverfew_Hyssop_Echinacea",
+        "Fennel",
+        "Nasturtium_Calendula_Borage_Pansy_Viola",
+        "Petunia",
+        "GerberaDaisy",
+        "Zinnia",
+        "Snapdragon",
+        "Begonia_Impatiens",
+        "SweetAlyssum",
+        "Lobelia",
+        "Marigold",
+        "Dianthus",
+        "Cornflower",
+        "Portulaca",
+        "Ginger_Turmeric",
+        "Claytonia",
+        "LandCress",
+        "WelshOnion",
+        "Daylily",
+        "FavaBeans",
+        "BearsGarlic",
+        "Lettuce_Spinach_Kale",
+        "Lettuce_Arugula_Chard",
+        "Lettuce_Basil_Parsley",
+        "Spinach_Kale_Chard",
+        "Microgreens",
+        "SaladGreens",
+        "Lettuce_Spinach_Arugula_Radish",
+        "BokChoy_Tatsoi_Komatsuna",
+        "Mizuna_Mibuna_Senposai",
+        "Basil_Mint_Parsley",
+        "Cilantro_Dill_Chives",
+        "Rosemary_Thyme_Oregano",
+        "LemonBalm_Chamomile_Mint",
+        "Mediterranean_Herb",
+        "Tomato_Pepper_Eggplant",
+        "CherryTomato_BellPepper",
+        "Pepper_Cucumber",
+        "Eggplant_Zucchini_Pepper",
+        "Tomato_CherryTomato_Roma",
+        "BellPepper_ChiliPepper_Jalapeno",
+        "Radish_Turnip_Carrot",
+        "GreenOnion_GarlicChives_Leek",
+        "Onion_Shallot_Chive",
+        "Petunia_Lobelia_Alyssum",
+        "BushBeans_PoleBeans_Edamame",
+        "Watercress_Purslane_Sorrel",
+        "Radicchio_Mache",
+        "BeetGreens_TurnipGreens_CollardGreens",
+        "Tomato_Basil",
+        "Shiso_VietnameseCoriander_Culantro",
+        "Lavender_Rosemary_Sage",
+    ]
 end
 
 class YC01 : Driver
@@ -52,14 +214,16 @@ class YC01 : Driver
     var fails, last_try, last_forced_reconnect
     var orp_offset, orp_raw
     var hold
-    var scan_init
+    var connected
     var profile_name
+    var boost
     var _mac_cache
-    var _fmin, _fmax, _fmar  # flat range arrays
+    var _fmin, _fmax, _fmar
+    var _bmin, _bmax, _bmar  # boost arrays
 
     def init(mac, poll_s, addr_type)
         import string
-        if mac == nil   mac = persist.find("yc01_mac", "414284588113") end
+        if mac == nil   mac = persist.find("yc01_mac", _PF_MAC) end
         if addr_type == nil   addr_type = persist.find("yc01_addr_type", 0) end
         self.mac = mac
         self.mac_hex = string.toupper(string.replace(mac, ":", ""))
@@ -79,19 +243,23 @@ class YC01 : Driver
         self.orp_offset = 0
         self.orp_raw = 0
         self.hold = false
-        self.scan_init = false
+        self.connected = false
+        self.boost = false
+        self.profile_name = "Generic"
         self._mac_cache = nil
-        _pfl_build()
+        # default range arrays (overwritten by _load_profile)
+        self._fmin = [5.8, 1000, 640, 300, 0, 20, 0, 60]
+        self._fmax = [6.2, 2500, 1600, 450, 0.2, 25, 750, 100]
+        self._fmar = [0.1, 200, 128, 50, 0.1, 2, 125, 30]
+        _pf_count()
         self._load_profile(persist.find("yc01_profile", "Generic"))
         tasmota.add_rule("BLEOperation#read",   /v, t, m -> self._got_data(v, m))
         tasmota.add_rule("BLEOperation#notify", /v, t, m -> self._got_data(v, m))
         tasmota.add_rule("BLEOperation#state",  /v, t, m -> self._got_state(v, m))
         tasmota.add_rule("BLE#BLEDevices",      /v, t, m -> self._seen(v))
-        tasmota.add_rule("BLE",                 /v, t, m -> self._on_ble(v, m))
-        log("YC01: v4.0 started, MAC " + self.mac)
+        log("YC01: v4.1 started, MAC " + self.mac + ", " + str(_pf_count()) + " profiles")
     end
 
-    # ---- BLE helpers ----
     def _mac_arg()
         if self._mac_cache == nil
             var m = self.mac
@@ -107,7 +275,6 @@ class YC01 : Driver
         return string.find(string.toupper(str(msg)), self.mac_hex) >= 0
     end
 
-    # ---- connection state machine ----
     def read()   self._start(true)   end
 
     def _start(force)
@@ -124,21 +291,6 @@ class YC01 : Driver
         if self.phase == 3
             tasmota.cmd("BLEOp1 M:" + m + " s:FF01 c:FF02 n:FF02 k:60000 r go")
         end
-    end
-
-    def cmd_start()       self.send_payload([1, 1], true)            end
-    def cmd_stop()        self.send_payload([1, 2, 0, 0, 0], false) end
-
-    def send_payload(l, and_read)
-        var b = bytes()
-        var chk = 0
-        for v : l
-            b.add(v & 0xFF, 1)
-            chk = chk ^ (v & 0xFF)
-        end
-        b.add(chk, 1)
-        var m = self._mac_arg()
-        tasmota.cmd("BLEOp1 M:" + m + " s:FF01 c:FF02 k:60000 w:" + b.tohex() + " go")
     end
 
     def _finish(ok)
@@ -160,36 +312,9 @@ class YC01 : Driver
         if v == "DONEREAD" || v == "DONENOTIFIED"   return   end
         if v == "DONEWRITE"   return   end
         if self.awaiting && string.find(v, "FAIL") >= 0
+            self.connected = false
             self._finish(false)
         end
-    end
-
-    def _on_ble(v, msg)
-        var devices = self._extract(v)
-        if devices == nil   devices = self._extract(msg) end
-        if devices != nil   self._seen(devices) end
-    end
-
-    def _extract(x)
-        if x == nil   return nil   end
-        import json
-        var m = x
-        if type(m) == 'string'
-            try   m = json.load(m)   except ..   return nil   end
-        end
-        if type(m) != 'instance' && type(m) != 'map'   return nil   end
-        if m.contains("BLEDevices")   return m["BLEDevices"] end
-        return nil
-    end
-
-    def _find_mac_key(v)
-        if v == nil   return nil   end
-        import string
-        var candidates = [self.mac_hex, string.tolower(self.mac_hex), self.mac_hex + "/0", self.mac_hex + "/1"]
-        for k : candidates
-            if v.contains(k)   return k   end
-        end
-        return nil
     end
 
     def _seen(v)
@@ -204,7 +329,16 @@ class YC01 : Driver
         end
     end
 
-    # ---- RX frame handling ----
+    def _find_mac_key(v)
+        if v == nil   return nil   end
+        import string
+        var candidates = [self.mac_hex, string.tolower(self.mac_hex), self.mac_hex + "/0", self.mac_hex + "/1"]
+        for k : candidates
+            if v.contains(k)   return k   end
+        end
+        return nil
+    end
+
     def _got_data(v, msg)
         if !self._is_ours(msg)   return   end
         self.watchdog = 0
@@ -251,6 +385,7 @@ class YC01 : Driver
         if b < 0   b = 0   end
         if b > 100   b = 100 end
         self.hold = (d.size() > 17) && ((d[17] >> 4) != 0)
+        self.connected = true
         var m = {"pH":ph, "EC":ec, "TDS":tds, "ORP":orp, "Cl":cl, "Temp":temp, "Batt":int(b+0.5), "SALT":ec*0.55, "RSSI":self.rssi}
         self.last = m
     end
@@ -264,46 +399,46 @@ class YC01 : Driver
     # ---- profiles ----
     def _load_profile(name)
         if name == nil   name = "Generic" end
-        var vals = _PFL.find(name)
+        var vals = _pf_find(name)
         if vals == nil
             name = "Generic"
-            vals = _PFL.find("Generic")
+            vals = _pf_find("Generic")
         end
+        if vals == nil   return   end
         self.profile_name = name
-        var ec_min = vals[2], ec_max = vals[3]
+        self._apply_vals(vals)
+        if self.boost && vals[10] > 0
+            self._apply_boost(vals)
+        end
+    end
+
+    def _apply_vals(v)
+        var ec_min = v[2], ec_max = v[3]
         var ec_mar = int((ec_max - ec_min) * 0.15 + 0.5)
         if ec_mar < 50   ec_mar = 50 end
         var tds_mar = int(ec_mar * 0.64)
         if tds_mar < 32   tds_mar = 32 end
-        var cl_mar = vals[6] * 0.5
-        var salt_mar = vals[9] * 0.15
+        var cl_mar = v[6] * 0.5
+        var salt_mar = v[9] * 0.15
         if salt_mar < 50   salt_mar = 50 end
-        self._fmin =    [vals[0], ec_min, int(ec_min*0.64), vals[7], 0,      vals[4], 0,       60]
-        self._fmax =    [vals[1], ec_max, int(ec_max*0.64), vals[8], vals[6], vals[5], vals[9],  100]
-        self._fmar =    [0.1,     ec_mar, tds_mar,         50,     cl_mar,  2,       int(salt_mar+0.5), 30]
+        self._fmin = [v[0], ec_min, int(ec_min*0.64), v[7], 0,      v[4], 0,       60]
+        self._fmax = [v[1], ec_max, int(ec_max*0.64), v[8], v[6],   v[5], v[9],    100]
+        self._fmar = [0.1,   ec_mar,  tds_mar,         50,    cl_mar,  2,    int(salt_mar+0.5), 30]
     end
 
-    # ---- scheduling ----
-    def every_second()
-        var now = tasmota.millis() / 1000
-        if !self.scan_init && now > 10
-            tasmota.cmd("BLEScan0 1")
-            self.scan_init = true
-        end
-        if self.awaiting
-            self.watchdog += 1
-            if self.watchdog > 45   self._finish(false) end
-            return
-        end
-        self.tick += 1
-        if self.tick >= self.poll_s
-            self.tick = 0
-            self._start(false)
-        end
+    def _apply_boost(v)
+        if v[10] != 1   return   end
+        var ec_min = v[13], ec_max = v[14]
+        var ec_mar = int((ec_max - ec_min) * 0.15 + 0.5)
+        if ec_mar < 50   ec_mar = 50 end
+        var tds_mar = int(ec_mar * 0.64)
+        if tds_mar < 32   tds_mar = 32 end
+        self._fmin = [v[11], ec_min, int(ec_min*0.64), v[7], 0,      v[15], 0,       60]
+        self._fmax = [v[12], ec_max, int(ec_max*0.64), v[8], v[6],   v[16], v[9],    100]
+        self._fmar = [0.1,    ec_mar,  tds_mar,         50,    self._fmar[4],  2,    self._fmar[6], 30]
     end
 
-    # ---- web ----
-    def _col(v, key)
+    def _range_color(v, key)
         var i = -1
         if key == "pH"    i = 0
         elif key == "EC"   i = 1
@@ -328,20 +463,37 @@ class YC01 : Driver
         return "<span style='color:" + color + "'>" + str(val) + "</span>"
     end
 
-    def web_sensor()
-        if self.last.size() == 0
-            tasmota.web_send_decimal("{s}Status{m}Not connected{e}")
+    # ---- scheduling ----
+    def every_second()
+        var now = tasmota.millis() / 1000
+        if self.awaiting
+            self.watchdog += 1
+            if self.watchdog > 45   self._finish(false) end
             return
         end
+        self.tick += 1
+        if self.tick >= self.poll_s
+            self.tick = 0
+            self._start(false)
+        end
+    end
+
+    # ---- web ----
+    def web_sensor()
         import string
+        if self.last.size() == 0 || !self.connected
+            tasmota.web_send_decimal("{s}Status{m}Disconnected{e}")
+            return
+        end
         var m = self.last
-        tasmota.web_send_decimal("{s}pH{m}" + self._span(string.format("%.2f", m["pH"]), self._col(m["pH"], "pH")) + "{e}")
-        tasmota.web_send_decimal("{s}EC{m}" + self._span(string.format("%i", m["EC"]), self._col(m["EC"], "EC")) + "{e}")
-        tasmota.web_send_decimal("{s}TDS{m}" + self._span(string.format("%i", m["TDS"]), self._col(m["TDS"], "TDS")) + "{e}")
-        tasmota.web_send_decimal("{s}ORP{m}" + self._span(string.format("%i", m["ORP"]), self._col(m["ORP"], "ORP")) + "{e}")
-        tasmota.web_send_decimal("{s}Temp{m}" + self._span(string.format("%.1f", m["Temp"]), self._col(m["Temp"], "Temp")) + "{e}")
-        tasmota.web_send_decimal("{s}Chlorine{m}" + self._span(string.format("%.2f", m["Cl"]), self._col(m["Cl"], "Cl")) + "{e}")
-        tasmota.web_send_decimal("{s}Battery{m}" + self._span(string.format("%i", m["Batt"]), self._col(m["Batt"], "Batt")) + "{e}")
+        tasmota.web_send_decimal("{s}pH{m}" + self._span(string.format("%.2f", m["pH"]), self._range_color(m["pH"], "pH")) + "{e}")
+        tasmota.web_send_decimal("{s}EC{m}" + self._span(string.format("%i uS/cm", m["EC"]), self._range_color(m["EC"], "EC")) + "{e}")
+        tasmota.web_send_decimal("{s}TDS{m}" + self._span(string.format("%i ppm", m["TDS"]), self._range_color(m["TDS"], "TDS")) + "{e}")
+        tasmota.web_send_decimal("{s}ORP{m}" + self._span(string.format("%i mV", m["ORP"]), self._range_color(m["ORP"], "ORP")) + "{e}")
+        tasmota.web_send_decimal("{s}SALT{m}" + self._span(string.format("%.1f ppm", m["SALT"]), self._range_color(m["SALT"], "SALT")) + "{e}")
+        tasmota.web_send_decimal("{s}Temp{m}" + self._span(string.format("%.1f °C", m["Temp"]), self._range_color(m["Temp"], "Temp")) + "{e}")
+        tasmota.web_send_decimal("{s}Chlorine{m}" + self._span(string.format("%.2f mg/L", m["Cl"]), self._range_color(m["Cl"], "Cl")) + "{e}")
+        tasmota.web_send_decimal("{s}Battery{m}" + self._span(string.format("%i ％", m["Batt"]), self._range_color(m["Batt"], "Batt")) + "{e}")
     end
 end
 
@@ -386,6 +538,18 @@ def yc01profile_cmd(cmd, idx, payload, payload_json)
     var p = str(payload)
     if p == ""
         log("YC01: active profile: " + yc01.profile_name)
+        log("YC01: boost: " + (yc01.boost ? "on" : "off"))
+        var names = _pf_names()
+        var line = ""
+        for n : names
+            if line != ""   line += ", "   end
+            line += n
+            if size(line) > 70
+                log("YC01: " + line)
+                line = ""
+            end
+        end
+        if line != ""   log("YC01: " + line)   end
     else
         yc01._load_profile(p)
         persist.yc01_profile = yc01.profile_name
@@ -395,3 +559,13 @@ def yc01profile_cmd(cmd, idx, payload, payload_json)
     return true
 end
 tasmota.add_cmd("yc01profile", yc01profile_cmd)
+
+def yc01boost_cmd(cmd, idx, payload, payload_json)
+    var on = int(payload) != 0
+    yc01.boost = on
+    yc01._load_profile(yc01.profile_name)
+    log("YC01: boost " + (on ? "enabled" : "disabled"))
+    tasmota.resp_cmnd_done()
+    return true
+end
+tasmota.add_cmd("yc01boost", yc01boost_cmd)
