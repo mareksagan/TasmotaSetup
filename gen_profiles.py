@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Generate profiles.bin and update _pf_names() in yc01.be from profiles.csv."""
+"""Generate profiles.bin from new_profiles.csv for yc01.be driver."""
 import struct
 import csv
-import re
-import sys
 
-CSV_FILE = "profiles.csv"
+CSV_FILE = "new_profiles.csv"
 BIN_FILE = "profiles.bin"
-BE_FILE = "yc01.be"
 
 # Record format: 1 byte name_len + 40 bytes name + 17 × 4-byte int32 (val*100)
 RECORD_SIZE = 1 + 40 + 17 * 4  # 109 bytes
@@ -37,6 +34,9 @@ def parse_csv():
     return profiles
 
 def generate_bin(profiles):
+    # Sort by name for binary search
+    profiles.sort(key=lambda p: p[0])
+    
     with open(BIN_FILE, 'wb') as f:
         # Header: 2 bytes = number of profiles
         f.write(struct.pack('<H', len(profiles)))
@@ -53,40 +53,11 @@ def generate_bin(profiles):
                     iv = 0
                 f.write(struct.pack('<i', iv))
 
-def update_berry(names):
-    with open(BE_FILE, 'r') as f:
-        content = f.read()
-    
-    # Generate compact _pf_names function (names packed per line)
-    new_func = 'def _pf_names()\n    return ['
-    line = ""
-    for name in names:
-        if line != "":
-            line += ", "
-        line += f'"{name}"'
-        if len(line) > 90:
-            new_func += line + ",\n        "
-            line = ""
-    if line != "":
-        new_func += line
-    new_func += ']\nend'
-    
-    # Replace existing function
-    pattern = r'def _pf_names\(\)\s*return\s*\[.*?\]\s*end'
-    new_content = re.sub(pattern, new_func, content, flags=re.DOTALL)
-    
-    with open(BE_FILE, 'w') as f:
-        f.write(new_content)
-
 if __name__ == '__main__':
     profiles = parse_csv()
-    names = [p[0] for p in profiles]
     
     generate_bin(profiles)
     print(f"Generated {BIN_FILE}: {len(profiles)} profiles, {2 + len(profiles) * RECORD_SIZE} bytes")
-    
-    update_berry(names)
-    print(f"Updated _pf_names() in {BE_FILE} with {len(names)} profiles")
-    print("\nNow upload both files to Tasmota UFS:")
+    print(f"\nUpload both files to Tasmota UFS:")
     print(f"  {BIN_FILE}")
-    print(f"  {BE_FILE}")
+    print(f"  yc01.be")
