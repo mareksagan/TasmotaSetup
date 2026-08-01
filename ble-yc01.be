@@ -1,10 +1,18 @@
 #======================================================================
 # yc01.be - BLE-YC01 (YIERYI / YINMIK 6-in-1 pool water monitor)
-#           v4.1 - lazy-loaded binary profiles, minimal memory
+#           v4.3 - optimized, cached, debounced
 #
 # Configuration:
 #   MAC address: change _PF_MAC to your meter's MAC
-#   Profiles file: profiles.bin (generated from new_profiles.csv)
+#   Profiles file: profiles.bin (generated from new_profiles.csv via gen_profiles.py)
+#
+# Console commands:
+#   yc01read              force immediate read
+#   yc01start             start measurement
+#   yc01stop              stop measurement
+#   yc01poll <seconds>    change read interval (default 50, min 10)
+#   yc01profile [name]    set profile or list available profiles
+#   yc01boost [0|1]       toggle fruiting-phase boost mode
 #
 # Protocol:
 #  * GATT: service 0xFF01, characteristic 0xFF02 for READ + WRITE.
@@ -17,13 +25,6 @@
 #      Temp = s16(b[13..14]) / 10
 #      Batt = clamp(100*(s16(b[15..16])-1950)/1240, 0, 100)
 #      SALT = EC * 0.55
-#
-# Profile binary format (profiles.bin):
-#   Header: 2 bytes = num_profiles
-#   Records: 1 byte name_len + 40 bytes name + 17 × 4-byte int32 (val*100)
-#   Record size: 109 bytes
-#
-# Commands: yc01read, yc01start, yc01stop, yc01poll, yc01profile
 #======================================================================
 
 import persist
@@ -32,6 +33,9 @@ import webserver
 var _PF_COUNT = 0
 var _PF_FNAME = "profiles.bin"
 var _PF_MAC = "414284588113"  # <-- change this to your meter's MAC
+var _PF_INDEX = {}   # name -> record_index (cached at init)
+var _PF_NAMES = []   # sorted names (cached at init)
+var _COLOR_IDX = {"pH":0,"EC":1,"TDS":2,"ORP":3,"Cl":4,"Temp":5,"SALT":6,"Batt":7}
 
 # ---- profile file helpers ----
 def _pf_open()
@@ -48,75 +52,68 @@ def _pf_count()
     if _PF_COUNT > 0   return _PF_COUNT   end
     var f = _pf_open()
     if f == nil   return 0   end
-    var h = f.read(2)
-    _PF_COUNT = int(h[0]) + (int(h[1]) << 8)
+    var h = f.readbytes(2)
+    if size(h) < 2
+        f.close()
+        return 0
+    end
+    _PF_COUNT = h[0] + (h[1] << 8)
     f.close()
     return _PF_COUNT
 end
 
-def _pf_find(name)
+def _pf_build_index()
+    if size(_PF_INDEX) > 0   return   end
     var cnt = _pf_count()
+    if cnt == 0   return   end
     var f = _pf_open()
-    if f == nil   return nil   end
-    var name_bytes = bytes(name)
-    var name_len = size(name)
+    if f == nil   return   end
+    import string
     for i : 0..cnt-1
         f.seek(2 + i * 109)
-        var rec = f.read(109)
-        if size(rec) < 109   break   end
-        var nl = int(rec[0])
-        if nl == name_len
-            var match = true
-            for j : 0..nl-1
-                if int(rec[1+j]) != int(name_bytes[j])
-                    match = false
-                    break
-                end
-            end
-            if match
-                f.close()
-                var vals = []
-                var pos = 41
-                for k : 0..16
-                    var b0 = int(rec[pos])
-                    var b1 = int(rec[pos+1])
-                    var b2 = int(rec[pos+2])
-                    var b3 = int(rec[pos+3])
-                    var iv = b0 + (b1 << 8) + (b2 << 16) + (b3 << 24)
-                    if iv > 2147483647   iv -= 4294967296   end
-                    vals.push(iv / 100.0)
-                    pos += 4
-                end
-                return vals
-            end
+        var hdr = f.readbytes(41)
+        if size(hdr) < 41   break   end
+        var nl = hdr[0]
+        var name = ""
+        for j : 0..nl-1
+            name += string.char(hdr[1+j])
         end
+        _PF_INDEX[name] = i
+        _PF_NAMES.push(name)
     end
     f.close()
-    return nil
+end
+
+def _pf_read_vals(idx)
+    var f = _pf_open()
+    if f == nil   return nil   end
+    f.seek(2 + idx * 109 + 41)
+    var data = f.readbytes(68)
+    f.close()
+    if size(data) < 68   return nil   end
+    var vals = []
+    for k : 0..16
+        var pos = k * 4
+        var iv = data[pos] + (data[pos+1] << 8) + (data[pos+2] << 16) + (data[pos+3] << 24)
+        if iv > 2147483647   iv -= 4294967296   end
+        vals.push(iv / 100.0)
+    end
+    return vals
+end
+
+def _pf_find(name)
+    if size(_PF_INDEX) == 0
+        _pf_build_index()
+    end
+    var idx = _PF_INDEX.find(name)
+    if idx == nil
+        return nil
+    end
+    return _pf_read_vals(idx)
 end
 
 def _pf_names()
-    return ["Generic", "CherryTomato", "BeefsteakTomato", "BellPepper_Poblano_BananaPepper", "ChiliPepper_Jalapeno_Cayenne",
-        "Habanero", "Eggplant", "Okra", "BushBeans", "PoleBeans", "Peas_SnowPeas_SugarSnapPeas", "Edamame",
-        "Cantaloupe_HoneydewMelon_MiniWatermelon", "Strawberry_EverbearingStrawberry_AlpineStrawberry",
-        "Lettuce_ButterheadLettuce_RomaineLettuce", "Spinach_NewZealandSpinach", "Kale_CollardGreens",
-        "Arugula", "Endive_Escarole_Frisee_Radicchio", "Mache", "Microgreens", "BokChoy_Senposai_YukinaSavoy",
-        "Tatsoi_Komatsuna_Mibuna", "MustardGreens", "Mizuna", "Watercress", "Amaranth", "MalabarSpinach",
-        "Purslane", "Sorrel", "Celtuce", "SweetPotatoVine", "GarlicChives", "Basil_ThaiBasil_HolyBasil",
-        "Parsley", "Cilantro", "Dill", "Mint_Peppermint_Spearmint", "Chives", "Oregano", "Thyme_Sage_Tarragon_Marjoram",
-        "Rosemary_BayLaurel", "LemonBalm", "Lemongrass", "Stevia", "Shiso", "VietnameseCoriander", "Culantro",
-        "Epazote", "Lovage", "SummerSavory", "WinterSavory", "Lavender", "Chamomile", "Feverfew_Hyssop_Echinacea",
-        "Fennel", "Nasturtium_Calendula_Borage_Pansy_Viola", "Petunia", "GerberaDaisy", "Zinnia", "Snapdragon",
-        "Begonia_Impatiens", "SweetAlyssum", "Lobelia", "Marigold", "Dianthus", "Cornflower", "Portulaca",
-        "Ginger_Turmeric", "Claytonia", "LandCress", "WelshOnion", "Daylily", "FavaBeans", "BearsGarlic",
-        "Lettuce_Spinach_Kale", "Lettuce_Arugula_Chard", "Lettuce_Basil_Parsley", "Spinach_Kale_Chard",
-        "Microgreens", "SaladGreens", "Lettuce_Spinach_Arugula_Radish", "BokChoy_Tatsoi_Komatsuna", "Mizuna_Mibuna_Senposai",
-        "Basil_Mint_Parsley", "Cilantro_Dill_Chives", "Rosemary_Thyme_Oregano", "LemonBalm_Chamomile_Mint",
-        "Mediterranean_Herb", "Tomato_Pepper_Eggplant", "CherryTomato_BellPepper", "Pepper_Cucumber",
-        "Eggplant_Zucchini_Pepper", "Tomato_CherryTomato_Roma", "BellPepper_ChiliPepper_Jalapeno", "Radish_Turnip_Carrot",
-        "GreenOnion_GarlicChives_Leek", "Onion_Shallot_Chive", "Petunia_Lobelia_Alyssum", "BushBeans_PoleBeans_Edamame",
-        "Watercress_Purslane_Sorrel", "Radicchio_Mache", "BeetGreens_TurnipGreens_CollardGreens", "Tomato_Basil",
-        "Shiso_VietnameseCoriander_Culantro", "Lavender_Rosemary_Sage"]
+    return _PF_NAMES
 end
 
 class YC01 : Driver
@@ -124,7 +121,7 @@ class YC01 : Driver
     var poll_s
     var last, last_ok, last_seen, rssi
     var tick, awaiting, watchdog, phase
-    var fails, last_try, last_forced_reconnect
+    var fails, last_try
     var orp_offset, orp_raw
     var hold
     var connected
@@ -132,7 +129,9 @@ class YC01 : Driver
     var boost
     var _mac_cache
     var _fmin, _fmax, _fmar
-    var _bmin, _bmax, _bmar  # boost arrays
+    var _persist_dirty
+    var _retry_cnt
+    var _retry_at
 
     def init(mac, poll_s, addr_type)
         import string
@@ -141,8 +140,8 @@ class YC01 : Driver
         self.mac = mac
         self.mac_hex = string.toupper(string.replace(mac, ":", ""))
         self.addr_type = addr_type
-        self.poll_s = (poll_s == nil) ? persist.find("yc01_poll", 50) : poll_s
-        self.last = {}
+        self.poll_s = (poll_s == nil) ? persist.find("yc01_poll", 240) : poll_s
+        self.last = {"pH":0,"EC":0,"TDS":0,"ORP":0,"Cl":0,"Temp":0,"Batt":0,"SALT":0,"RSSI":0}
         self.last_ok = -1
         self.last_seen = -1
         self.rssi = 0
@@ -152,25 +151,27 @@ class YC01 : Driver
         self.phase = 0
         self.fails = 0
         self.last_try = 0
-        self.last_forced_reconnect = 0
         self.orp_offset = 0
         self.orp_raw = 0
         self.hold = false
         self.connected = false
-        self.boost = false
+        self.boost = persist.find("yc01_boost", 0) != 0
         self.profile_name = "Generic"
         self._mac_cache = nil
-        # default range arrays (overwritten by _load_profile)
         self._fmin = [5.8, 1000, 640, 300, 0, 20, 0, 60]
-        self._fmax = [6.2, 2500, 1600, 450, 0.2, 25, 750, 100]
+        self._fmax = [6.2, 2500, 1600, 450, 0.2, 25, 750, 1000]
         self._fmar = [0.1, 200, 128, 50, 0.1, 2, 125, 30]
+        self._persist_dirty = false
+        self._retry_cnt = 0
+        self._retry_at = 0
         _pf_count()
+        _pf_build_index()
         self._load_profile(persist.find("yc01_profile", "Generic"))
         tasmota.add_rule("BLEOperation#read",   /v, t, m -> self._got_data(v, m))
         tasmota.add_rule("BLEOperation#notify", /v, t, m -> self._got_data(v, m))
         tasmota.add_rule("BLEOperation#state",  /v, t, m -> self._got_state(v, m))
         tasmota.add_rule("BLE#BLEDevices",      /v, t, m -> self._seen(v))
-        log("YC01: v4.1 started, MAC " + self.mac + ", " + str(_pf_count()) + " profiles")
+        log("YC01: v4.3 started, MAC " + self.mac)
     end
 
     def _mac_arg()
@@ -202,7 +203,10 @@ class YC01 : Driver
     def _issue()
         var m = self._mac_arg()
         if self.phase == 3
-            tasmota.cmd("BLEOp1 M:" + m + " s:FF01 c:FF02 n:FF02 k:60000 r go")
+            # No notifications (n:FF02) - meter only sends them on data change
+            # which causes connection to die when data is stable.
+            # Frequent reads (every 30s) keep the meter awake.
+            tasmota.cmd("BLEOp1 M:" + m + " s:FF01 c:FF02 r go")
         end
     end
 
@@ -211,9 +215,15 @@ class YC01 : Driver
         self.phase = 0
         if ok
             self.fails = 0
+            self._retry_cnt = 0
             self.last_ok = tasmota.millis() / 1000
         else
             self.fails += 1
+            # Fast retry: up to 5 attempts, 5s apart
+            if self._retry_cnt < 5
+                self._retry_cnt += 1
+                self._retry_at = tasmota.millis() / 1000 + 5
+            end
         end
     end
 
@@ -285,7 +295,6 @@ class YC01 : Driver
     end
 
     def _parse(d)
-        import string
         var ph = self._s16(d, 3) / 100.0
         var ec = self._s16(d, 5)
         var tds = self._s16(d, 7)
@@ -299,8 +308,17 @@ class YC01 : Driver
         if b > 100   b = 100 end
         self.hold = (d.size() > 17) && ((d[17] >> 4) != 0)
         self.connected = true
-        var m = {"pH":ph, "EC":ec, "TDS":tds, "ORP":orp, "Cl":cl, "Temp":temp, "Batt":int(b+0.5), "SALT":ec*0.55, "RSSI":self.rssi}
-        self.last = m
+        # Reuse pre-allocated map - just update values
+        var m = self.last
+        m["pH"] = ph
+        m["EC"] = ec
+        m["TDS"] = tds
+        m["ORP"] = orp
+        m["Cl"] = cl
+        m["Temp"] = temp
+        m["Batt"] = int(b + 0.5)
+        m["SALT"] = ec * 0.55
+        m["RSSI"] = self.rssi
     end
 
     def _s16(d, i)
@@ -314,6 +332,7 @@ class YC01 : Driver
         if name == nil   name = "Generic" end
         var vals = _pf_find(name)
         if vals == nil
+            log("YC01: profile '" + name + "' not found, using Generic", 2)
             name = "Generic"
             vals = _pf_find("Generic")
         end
@@ -334,9 +353,13 @@ class YC01 : Driver
         var cl_mar = v[6] * 0.5
         var salt_mar = v[9] * 0.15
         if salt_mar < 50   salt_mar = 50 end
-        self._fmin = [v[0], ec_min, int(ec_min*0.64), v[7], 0,      v[4], 0,       60]
-        self._fmax = [v[1], ec_max, int(ec_max*0.64), v[8], v[6],   v[5], v[9],    100]
-        self._fmar = [0.1,   ec_mar,  tds_mar,         50,    cl_mar,  2,    int(salt_mar+0.5), 30]
+        # Update arrays in-place to avoid GC
+        var mn = self._fmin
+        var mx = self._fmax
+        var mg = self._fmar
+        mn[0]=v[0]; mn[1]=ec_min; mn[2]=int(ec_min*0.64); mn[3]=v[7]; mn[4]=0; mn[5]=v[4]; mn[6]=0; mn[7]=60
+        mx[0]=v[1]; mx[1]=ec_max; mx[2]=int(ec_max*0.64); mx[3]=v[8]; mx[4]=v[6]; mx[5]=v[5]; mx[6]=v[9]; mx[7]=100
+        mg[0]=0.1; mg[1]=ec_mar; mg[2]=tds_mar; mg[3]=50; mg[4]=cl_mar; mg[5]=2; mg[6]=int(salt_mar+0.5); mg[7]=30
     end
 
     def _apply_boost(v)
@@ -346,22 +369,16 @@ class YC01 : Driver
         if ec_mar < 50   ec_mar = 50 end
         var tds_mar = int(ec_mar * 0.64)
         if tds_mar < 32   tds_mar = 32 end
-        self._fmin = [v[11], ec_min, int(ec_min*0.64), v[7], 0,      v[15], 0,       60]
-        self._fmax = [v[12], ec_max, int(ec_max*0.64), v[8], v[6],   v[16], v[9],    100]
-        self._fmar = [0.1,    ec_mar,  tds_mar,         50,    self._fmar[4],  2,    self._fmar[6], 30]
+        var mn = self._fmin
+        var mx = self._fmax
+        var mg = self._fmar
+        mn[0]=v[11]; mn[1]=ec_min; mn[2]=int(ec_min*0.64); mn[3]=v[7]; mn[4]=0; mn[5]=v[15]; mn[6]=0; mn[7]=60
+        mx[0]=v[12]; mx[1]=ec_max; mx[2]=int(ec_max*0.64); mx[3]=v[8]; mx[4]=v[6]; mx[5]=v[16]; mx[6]=v[9]; mx[7]=100
+        mg[0]=0.1; mg[1]=ec_mar; mg[2]=tds_mar; mg[3]=50; mg[4]=mg[4]; mg[5]=2; mg[6]=mg[6]; mg[7]=30
     end
 
     def _range_color(v, key)
-        var i = -1
-        if key == "pH"    i = 0
-        elif key == "EC"   i = 1
-        elif key == "TDS"  i = 2
-        elif key == "ORP"  i = 3
-        elif key == "Cl"   i = 4
-        elif key == "Temp" i = 5
-        elif key == "SALT" i = 6
-        elif key == "Batt" i = 7
-        end
+        var i = _COLOR_IDX.find(key)
         if i < 0   return "green" end
         var mn = self._fmin[i]
         var mx = self._fmax[i]
@@ -372,16 +389,24 @@ class YC01 : Driver
         return "green"
     end
 
-    def _span(val, color)
-        return "<span style='color:" + color + "'>" + str(val) + "</span>"
-    end
-
     # ---- scheduling ----
     def every_second()
         var now = tasmota.millis() / 1000
+        # Flush dirty persist state (debounced flash writes)
+        if self._persist_dirty
+            persist.save()
+            self._persist_dirty = false
+        end
         if self.awaiting
             self.watchdog += 1
-            if self.watchdog > 45   self._finish(false) end
+            if self.watchdog > 15   self._finish(false) end
+            return
+        end
+        # Fast retry on failure: 5s gap, up to 5 attempts
+        # Catches meter during BLE advertising windows after auto-off
+        if self._retry_cnt > 0 && now >= self._retry_at
+            self._retry_at = now + 5
+            self._start(false)
             return
         end
         self.tick += 1
@@ -394,19 +419,23 @@ class YC01 : Driver
     # ---- web ----
     def web_sensor()
         import string
+        var out = ""
         if self.last.size() == 0 || !self.connected
-            tasmota.web_send_decimal("{s}Status{m}Disconnected{e}")
+            out += "{s}Status{m}<span style='color:red'>Disconnected</span>{e}"
+            tasmota.web_send_decimal(out)
             return
         end
         var m = self.last
-        tasmota.web_send_decimal("{s}pH{m}" + self._span(string.format("%.2f", m["pH"]), self._range_color(m["pH"], "pH")) + "{e}")
-        tasmota.web_send_decimal("{s}EC{m}" + self._span(string.format("%i uS/cm", m["EC"]), self._range_color(m["EC"], "EC")) + "{e}")
-        tasmota.web_send_decimal("{s}TDS{m}" + self._span(string.format("%i ppm", m["TDS"]), self._range_color(m["TDS"], "TDS")) + "{e}")
-        tasmota.web_send_decimal("{s}ORP{m}" + self._span(string.format("%i mV", m["ORP"]), self._range_color(m["ORP"], "ORP")) + "{e}")
-        tasmota.web_send_decimal("{s}SALT{m}" + self._span(string.format("%.1f ppm", m["SALT"]), self._range_color(m["SALT"], "SALT")) + "{e}")
-        tasmota.web_send_decimal("{s}Temp{m}" + self._span(string.format("%.1f °C", m["Temp"]), self._range_color(m["Temp"], "Temp")) + "{e}")
-        tasmota.web_send_decimal("{s}Chlorine{m}" + self._span(string.format("%.2f mg/L", m["Cl"]), self._range_color(m["Cl"], "Cl")) + "{e}")
-        tasmota.web_send_decimal("{s}Battery{m}" + self._span(string.format("%i ％", m["Batt"]), self._range_color(m["Batt"], "Batt")) + "{e}")
+        out += "{s}Status{m}<span style='color:green'>Connected</span>{e}"
+        out += string.format("{s}pH{m}<span style='color:%s'>%.2f</span>{e}", self._range_color(m["pH"], "pH"), m["pH"])
+        out += string.format("{s}EC{m}<span style='color:%s'>%i uS/cm</span>{e}", self._range_color(m["EC"], "EC"), m["EC"])
+        out += string.format("{s}TDS{m}<span style='color:%s'>%i ppm</span>{e}", self._range_color(m["TDS"], "TDS"), m["TDS"])
+        out += string.format("{s}ORP{m}<span style='color:%s'>%i mV</span>{e}", self._range_color(m["ORP"], "ORP"), m["ORP"])
+        out += string.format("{s}SALT{m}<span style='color:%s'>%.1f ppm</span>{e}", self._range_color(m["SALT"], "SALT"), m["SALT"])
+        out += string.format("{s}Temp{m}<span style='color:%s'>%.1f °C</span>{e}", self._range_color(m["Temp"], "Temp"), m["Temp"])
+        out += string.format("{s}Chlorine{m}<span style='color:%s'>%.2f mg/L</span>{e}", self._range_color(m["Cl"], "Cl"), m["Cl"])
+        out += string.format("{s}Battery{m}<span style='color:%s'>%i ％</span>{e}", self._range_color(m["Batt"], "Batt"), m["Batt"])
+        tasmota.web_send_decimal(out)
     end
 end
 
@@ -438,10 +467,10 @@ tasmota.add_cmd("yc01stop", yc01stop_cmd)
 
 def yc01poll_cmd(cmd, idx, payload, payload_json)
     yc01.poll_s = int(payload)
-    if yc01.poll_s < 10   yc01.poll_s = 10 end
-    if yc01.poll_s > 3600   yc01.poll_s = 3600 end
+    if yc01.poll_s < 30   yc01.poll_s = 30 end
+    if yc01.poll_s > 600   yc01.poll_s = 600 end
     persist.yc01_poll = yc01.poll_s
-    persist.save()
+    yc01._persist_dirty = true
     tasmota.resp_cmnd_done()
     return true
 end
@@ -466,7 +495,7 @@ def yc01profile_cmd(cmd, idx, payload, payload_json)
     else
         yc01._load_profile(p)
         persist.yc01_profile = yc01.profile_name
-        persist.save()
+        yc01._persist_dirty = true
     end
     tasmota.resp_cmnd_done()
     return true
@@ -476,9 +505,53 @@ tasmota.add_cmd("yc01profile", yc01profile_cmd)
 def yc01boost_cmd(cmd, idx, payload, payload_json)
     var on = int(payload) != 0
     yc01.boost = on
+    persist.yc01_boost = on ? 1 : 0
+    yc01._persist_dirty = true
     yc01._load_profile(yc01.profile_name)
     log("YC01: boost " + (on ? "enabled" : "disabled"))
     tasmota.resp_cmnd_done()
     return true
 end
 tasmota.add_cmd("yc01boost", yc01boost_cmd)
+
+def yc01mac_cmd(cmd, idx, payload, payload_json)
+    import string
+    var p = str(payload)
+    if p == ""
+        log("YC01: MAC: " + yc01.mac + " type " + str(yc01.addr_type))
+        tasmota.resp_cmnd_done()
+        return true
+    end
+    # Parse MAC and optional type
+    var parts = string.split(p, " ")
+    var mac_str = parts[0]
+    var atype = 0
+    if size(parts) > 1   atype = int(parts[1]) end
+    # Strip colons/dashes and validate
+    mac_str = string.replace(string.upper(mac_str), ":", "")
+    mac_str = string.replace(mac_str, "-", "")
+    if size(mac_str) != 12
+        log("YC01: invalid MAC, must be 12 hex digits", 2)
+        tasmota.resp_cmnd_done()
+        return true
+    end
+    for i : 0..11
+        var c = mac_str[i]
+        if (c < '0' || c > '9') && (c < 'A' || c > 'F')
+            log("YC01: invalid MAC, must be 12 hex digits", 2)
+            tasmota.resp_cmnd_done()
+            return true
+        end
+    end
+    yc01.mac = mac_str
+    yc01.mac_hex = mac_str
+    yc01.addr_type = atype
+    yc01._mac_arg_cache = nil
+    persist.yc01_mac = mac_str
+    persist.yc01_addr_type = atype
+    yc01._persist_dirty = true
+    log("YC01: MAC set to " + mac_str + " type " + str(atype))
+    tasmota.resp_cmnd_done()
+    return true
+end
+tasmota.add_cmd("yc01mac", yc01mac_cmd)
