@@ -52,7 +52,7 @@ enum YC01_OpState_e {YC01_IDLE = 0,YC01_BUSY,YC01_OK,YC01_FAIL};
 
 #define YC01_SVC_UUID       0xFF01
 #define YC01_CHR_UUID       0xFF02
-#define YC01_DEFAULT_POLL_S 120
+#define YC01_DEFAULT_POLL_S 240
 #define YC01_MIN_POLL_S     30
 #define YC01_MAX_POLL_S     600
 #define YC01_OP_TIMEOUT_S   15
