@@ -21,7 +21,7 @@
     YC01Read           - force immediate read
     YC01Poll N         - set poll interval (30-600s, default 240)
     YC01Profile [name] - set profile or list available
-    YC01Boost 0/1      - toggle boost mode
+    YC01Bloom 0/1      - toggle bloom mode
     YC01Mac <addr> [t] - show/set MAC and address type
 */
 
@@ -63,7 +63,7 @@ struct yc01_ranges_t {float fmin[8];
 #define YC01_DEFAULT_MAC "414284588113"
 #endif
 
-static const char* const YC01_PF_NAMES[] = {"Generic","CherryTomato","BeefsteakTomato","BellPepper_Poblano_BananaPepper","ChiliPepper_Jalapeno_Cayenne","Habanero","Eggplant","Okra","BushBeans","PoleBeans","Peas_SnowPeas_SugarSnapPeas","Edamame","Cantaloupe_HoneydewMelon_MiniWatermelon","Strawberry_EverbearingStrawberry_AlpineStrawberry","Lettuce_ButterheadLettuce_RomaineLettuce","Spinach_NewZealandSpinach","Kale_CollardGreens","Arugula","Endive_Escarole_Frisee_Radicchio","Mache","Microgreens","BokChoy_Senposai_YukinaSavoy","Tatsoi_Komatsuna_Mibuna","MustardGreens","Mizuna","Watercress","Amaranth","MalabarSpinach","Purslane","Sorrel","Celtuce","SweetPotatoVine","GarlicChives","Basil_ThaiBasil_HolyBasil","Parsley","Cilantro","Dill","Mint_Peppermint_Spearmint","Chives","Oregano","Thyme_Sage_Tarragon_Marjoram","Rosemary_BayLaurel","LemonBalm","Lemongrass","Stevia","Shiso","VietnameseCoriander","Culantro","Epazote","Lovage","SummerSavory","WinterSavory","Lavender","Chamomile","Feverfew_Hyssop_Echinacea","Fennel","Nasturtium_Calendula_Borage_Pansy_Viola","Petunia","GerberaDaisy","Zinnia","Snapdragon","Begonia_Impatiens","SweetAlyssum","Lobelia","Marigold","Dianthus","Cornflower","Portulaca","Ginger_Turmeric","Claytonia","LandCress","WelshOnion","Daylily","FavaBeans","BearsGarlic","BasilMintParsleyMix","BeetGreensTurnipGreensCollardGreensMix","Beetroot","BellPepperChiliPepperJalapenoMix","BokChoyTatsoiKomatsunaMix","Broccoli_Cauliflower_Cabbage_BrusselsSprouts_Kohlrabi","BushBeansPoleBeansEdamameMix","Carrot_SmallVariety","Celery","CherryTomatoBellPepperMix","CilantroDillChivesMix","Cucumber","EggplantZucchiniPepperMix","GreenOnionGarlicChivesLeekMix","GreenOnion_OnionGreens_ShallotGreens","LavenderRosemarySageMix","Leek","LemonBalmChamomileMintMix","LettuceArugulaChardMix","LettuceBasilParsleyMix","LettuceSpinachArugulaRadishMix","LettuceSpinachKaleMix","MediterraneanHerbMix","MicrogreensMix","MizunaMibunaSenposaiMix","OnionShallotChiveMix","PepperCucumberMix","PetuniaLobeliaAlyssumMix","Potato_SmallAeroponic","RadicchioMacheMix","Radish","RadishTurnipCarrotMix","RosemaryThymeOreganoMix","SaladGreensMix","ShisoVietnameseCorianderCulantroMix","SpinachKaleChardMix","SwissChard_NapaCabbage_TurnipGreens_BeetGreens","TomatoBasilMixCompanion","TomatoCherryTomatoRomaMix","TomatoPepperEggplantMix","Tomato_RomaTomato_HeirloomTomato","Turnip","WatercressPurslaneSorrelMix","Zucchini_SummerSquash_PattypanSquash"};
+static const char* const YC01_PF_NAMES[] = {"Generic","CherryTomato","BeefsteakTomato","BellPepper_Poblano_BananaPepper","ChiliPepper_Jalapeno_Cayenne","Habanero","Eggplant","Okra","BushBeans","PoleBeans","Peas_SnowPeas_SugarSnapPeas","Edamame","Cantaloupe_HoneydewMelon_MiniWatermelon","Strawberry_EverbearingStrawberry_AlpineStrawberry","Lettuce_ButterheadLettuce_RomaineLettuce","Spinach_NewZealandSpinach","Kale_CollardGreens","Arugula","Endive_Escarole_Frisee_Radicchio","Mache","Microgreens","BokChoy_Senposai_YukinaSavoy","Tatsoi_Komatsuna_Mibuna","MustardGreens","Mizuna","Watercress","Amaranth","MalabarSpinach","Purslane","Sorrel","Celtuce","SweetPotatoVine","GarlicChives","Basil_ThaiBasil_HolyBasil","Parsley","Cilantro","Dill","Mint_Peppermint_Spearmint","Chives","Oregano","Thyme_Sage_Tarragon_Marjoram","Rosemary_BayLaurel","LemonBalm","Lemongrass","Stevia","Shiso","VietnameseCoriander","Culantro","Epazote","Lovage","SummerSavory","WinterSavory","Lavender","Chamomile","Feverfew_Hyssop_Echinacea","Fennel","Nasturtium_Calendula_Borage_Pansy_Viola","Petunia","GerberaDaisy","Zinnia","Snapdragon","Begonia_Impatiens","SweetAlyssum","Lobelia","Marigold","Dianthus","Cornflower","Portulaca","Ginger_Turmeric","Claytonia","LandCress","WelshOnion","Daylily","FavaBeans","BearsGarlic","BasilMintParsley","BeetGreensTurnipGreensCollardGreens","Beetroot","BellPepperChiliPepperJalapeno","BokChoyTatsoiKomatsuna","Broccoli_Cauliflower_Cabbage_BrusselsSprouts_Kohlrabi","BushBeansPoleBeansEdamame","Carrot_SmallVariety","Celery","CherryTomatoBellPepper","CilantroDillChives","Cucumber","EggplantZucchiniPepper","GreenOnionGarlicChivesLeek","GreenOnion_OnionGreens_ShallotGreens","LavenderRosemarySage","Leek","LemonBalmChamomileMint","LettuceArugulaChard","LettuceBasilParsley","LettuceSpinachArugulaRadish","LettuceSpinachKale","MediterraneanHerb","Microgreens","MizunaMibunaSenposai","OnionShallotChive","PepperCucumber","PetuniaLobeliaAlyssum","Potato_SmallAeroponic","RadicchioMache","Radish","RadishTurnipCarrot","RosemaryThymeOregano","SaladGreens","ShisoVietnameseCorianderCulantro","SpinachKaleChard","SwissChard_NapaCabbage_TurnipGreens_BeetGreens","TomatoBasilCompanion","TomatoCherryTomatoRoma","TomatoPepperEggplant","Tomato_RomaTomato_HeirloomTomato","Turnip","WatercressPurslaneSorrel","Zucchini_SummerSquash_PattypanSquash"};
 
 static const float YC01_PF_DATA[][17] = {
 {5.8,6.2,1000,2500,20,25,0.2,300,450,750,0,0,0,0,0,0,0},
@@ -195,7 +195,7 @@ static yc01_ranges_t yc01_ranges = {};
 static char yc01_mac[YC01_MAX_MAC_LEN] = YC01_DEFAULT_MAC;
 static uint8_t yc01_addr_type = 0;
 static uint16_t yc01_poll_s = YC01_DEFAULT_POLL_S;
-static bool yc01_boost = false;
+static bool yc01_bloom = false;
 static bool yc01_connected = false;
 static int16_t yc01_rssi = 0;
 static int16_t yc01_orp_offset = 0;
@@ -206,6 +206,11 @@ static uint8_t yc01_mac_bytes[6] = {0};
 static String yc01_location = "";
 static String yc01_action_msg = "";
 static String yc01_notes_msg = "";
+static float yc01_volume_l = 20.0;
+static int yc01_water_type = 1;
+static float yc01_kh = 4.0f;
+static float yc01_ph_cal = 1.0f;
+static float yc01_ec_cal = 1.0f;
 static int yc01_pump_relay = 0;
 static int yc01_heater_relay = 0;
 static bool yc01_pump_auto = false;
@@ -331,7 +336,7 @@ static void yc01_load_profile(const char *name) {
     idx = 0;}
   yc01_profile_name = YC01_PF_NAMES[idx];
   yc01_apply_profile(YC01_PF_DATA[idx]);
-  if (yc01_boost && YC01_PF_DATA[idx][10] > 0) {yc01_apply_boost(YC01_PF_DATA[idx]);} else if (yc01_boost) {yc01_boost = false;}
+  if (yc01_bloom && YC01_PF_DATA[idx][10] > 0) {yc01_apply_boost(YC01_PF_DATA[idx]);} else if (yc01_bloom) {yc01_bloom = false;}
 }
 
 static int yc01_read_ok_cnt = 0;
@@ -402,7 +407,7 @@ static void CmndYC01(void);
 static void CmndYC01Read(void);
 static void CmndYC01Poll(void);
 static void CmndYC01Profile(void);
-static void CmndYC01Boost(void);
+static void CmndYC01Bloom(void);
 static void CmndYC01Mac(void);
 static void YC01Init(void);
 static void YC01EverySecond(void);
@@ -414,10 +419,23 @@ static void CmndYC01(void) {
   uint8_t mac[6];
   yc01_parse_mac(yc01_mac, mac, nullptr);
   yc01_mac_to_str(mac, macstr, sizeof(macstr));
-  Response_P(PSTR("{\"YC01\":{\"MAC\":\"%s\",\"Type\":%d,\"Poll\":%d,\"Profile\":\"%s\",\"Boost\":\"%s\",\"Valid\":\"%s\"}}"),
+  Response_P(PSTR("{\"YC01\":{\"MAC\":\"%s\",\"Type\":%d,\"Poll\":%d,\"Profile\":\"%s\",\"Bloom\":\"%s\",\"Volume\":%.1f,\"KH\":%.1f,\"Location\":\"%s\"}}"),
              macstr, yc01_addr_type, yc01_poll_s, yc01_profile_name.c_str(),
-             yc01_boost ? "on" : "off",
-             yc01_last.valid ? "true" : "false");
+             yc01_bloom ? "on" : "off", yc01_volume_l, yc01_kh, yc01_location.c_str());
+  AddLog(LOG_LEVEL_INFO, PSTR("YC01: Commands:"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01                 - this help + status"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01Read             - force immediate sensor read"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01Poll N           - set poll interval 30-600s (default 240)"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01Profile [name]   - set profile or list all"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01Bloom 0/1        - toggle bloom mode for current profile"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01Mac <addr> [type]- show/set MAC and address type"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01Location <city>  - set city (geocodes lat/lon for sun times)"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01LatLon <lat> <lon> - set coordinates directly"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01Pump <relay>      - set pump relay (1-4) + auto mode"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01Heater <relay>    - set heater relay (1-4) + auto mode"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01Volume <liters>   - set reservoir volume (default 20)"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01Water <type>      - Distilled|SoftTap|MediumTap|HardTap"));
+  AddLog(LOG_LEVEL_INFO, PSTR("  YC01Cal <param> <val> - KH|PH|EC calibration (e.g. KH 4.0)"));
 }
 
 static void CmndYC01Read(void) {
@@ -459,19 +477,19 @@ static void CmndYC01Profile(void) {
   Response_P(PSTR("{\"YC01\":{\"Profile\":\"%s\"%s}}"), yc01_profile_name.c_str(), warn.c_str());
 }
 
-static void CmndYC01Boost(void) {
-  bool want_boost = XdrvMailbox.payload != 0;
-  if (want_boost) {
+static void CmndYC01Bloom(void) {
+  bool want_bloom = XdrvMailbox.payload != 0;
+  if (want_bloom) {
     int idx = yc01_find_profile(yc01_profile_name.c_str());
     if (idx >= 0 && YC01_PF_DATA[idx][10] <= 0.0f) {
-      Response_P(PSTR("{\"YC01\":{\"Boost\":\"off\",\"Error\":\"boost not available for profile '%s\"}}"),
+      Response_P(PSTR("{\"YC01\":{\"Bloom\":\"off\",\"Error\":\"bloom not available for profile '%s\"}}"),
                  yc01_profile_name.c_str());
       return;
     }
   }
-  yc01_boost = want_boost;
+  yc01_bloom = want_bloom;
   yc01_load_profile(yc01_profile_name.c_str());
-  Response_P(PSTR("{\"YC01\":{\"Boost\":\"%s\"}}"), yc01_boost ? "on" : "off");
+  Response_P(PSTR("{\"YC01\":{\"Bloom\":\"%s\"}}"), yc01_bloom ? "on" : "off");
 }
 
 static void CmndYC01Mac(void) {
@@ -507,14 +525,17 @@ const char kYC01_Commands[] PROGMEM = "YC01|"
   "Read|"
   "Poll|"
   "Profile|"
-  "Boost|"
+  "Bloom|"
   "Mac|"
   "Location|"
   "LatLon|"
   "Pump|"
-  "Heater";
+  "Heater|"
+  "Volume|"
+  "Water|"
+  "Cal";
 
-void (*const YC01_Commands[])(void) PROGMEM = {&CmndYC01,&CmndYC01Read,&CmndYC01Poll,&CmndYC01Profile,&CmndYC01Boost,&CmndYC01Mac,&CmndYC01Location,&CmndYC01LatLon,&CmndYC01Pump,&CmndYC01Heater};
+void (*const YC01_Commands[])(void) PROGMEM = {&CmndYC01,&CmndYC01Read,&CmndYC01Poll,&CmndYC01Profile,&CmndYC01Bloom,&CmndYC01Mac,&CmndYC01Location,&CmndYC01LatLon,&CmndYC01Pump,&CmndYC01Heater,&CmndYC01Volume,&CmndYC01Water,&CmndYC01Cal};
 
 static void YC01Init(void) {
   yc01_mutex = xSemaphoreCreateMutex();
@@ -582,10 +603,16 @@ static void YC01WebSensor(void) {
   char pf_fmt[48];
   yc01_format_profile(yc01_profile_name.c_str(), pf_fmt, sizeof(pf_fmt));
   WSContentSend_PD(PSTR("{s}Profile{m}%s{e}"), pf_fmt);
-  WSContentSend_PD(PSTR("{s}Blooming boost{m}%s{e}"), yc01_boost ? "Yes" : "No");
+  WSContentSend_PD(PSTR("{s}Bloom{m}%s{e}"), yc01_bloom ? "Yes" : "No");
+  char buf16[16];
+  dtostrfd(yc01_volume_l, 0, buf16);
+  WSContentSend_PD(PSTR("{s}Volume{m}%sL{e}"), buf16);
+  dtostrfd(yc01_kh, 1, buf16);
+  WSContentSend_PD(PSTR("{s}KH{m}%s dKH{e}"), buf16);
+  WSContentSend_PD(PSTR("{s}Location{m}%s{e}"), yc01_location.length() > 0 ? yc01_location.c_str() : "Not set");
   WSContentSend_PD(PSTR("{s}pH{m}<span style='color:%s'>%*_f</span>{e}"),
                    yc01_color(r.ph, 0), 2, &r.ph);
-  WSContentSend_PD(PSTR("{s}EC{m}<span style='color:%s'>%d uS/cm</span>{e}"),
+  WSContentSend_PD(PSTR("{s}EC{m}<span style='color:%s'>%d \u00B5S/cm</span>{e}"),
                    yc01_color((float)r.ec, 1), r.ec);
   WSContentSend_PD(PSTR("{s}TDS{m}<span style='color:%s'>%d ppm</span>{e}"),
                    yc01_color((float)r.tds, 2), r.tds);
@@ -593,15 +620,25 @@ static void YC01WebSensor(void) {
                    yc01_color((float)r.orp, 3), r.orp);
   WSContentSend_PD(PSTR("{s}SALT{m}<span style='color:%s'>%*_f ppm</span>{e}"),
                    yc01_color(r.salt, 6), 1, &r.salt);
-  WSContentSend_PD(PSTR("{s}Temp{m}<span style='color:%s'>%*_f °C</span>{e}"),
-                   yc01_color(r.temp, 5), 1, &r.temp);
+  char tbuf[96];
+  char val[16];
+  dtostrfd(r.temp, 1, val);
+  const char* tcolor = "green";
+  const char* label = "Normal";
+  if (r.temp > yc01_ranges.fmax[5] + 5.0f) { tcolor = "red"; label = "Rotting"; }
+  else if (r.temp > yc01_ranges.fmax[5] + 2.0f) { tcolor = "orange"; label = "Warm"; }
+  else if (r.temp < yc01_ranges.fmin[5] - 5.0f) { tcolor = "blue"; label = "Lockout"; }
+  else if (r.temp < yc01_ranges.fmin[5] - 2.0f) { tcolor = "blue"; label = "Cold"; }
+  snprintf(tbuf, sizeof(tbuf), "%s (%s \u00B0C)", label, val);
+  WSContentSend_PD(PSTR("{s}Heat{m}<span style='color:%s'>%s</span>{e}"),
+                   tcolor, tbuf);
   WSContentSend_PD(PSTR("{s}Chlorine{m}<span style='color:%s'>%*_f mg/L</span>{e}"),
                    yc01_color(r.cl, 4), 2, &r.cl);
   const char* batt_color = r.batt >= 84 ? "green" : "red";
-  const char* batt_txt = r.batt >= 84 ? "High" : "Low";
-  WSContentSend_PD(PSTR("{s}Battery charge{m}<span style='color:%s'>%s</span>{e}"),
+  const char* batt_txt = r.batt >= 84 ? "Charged" : "Discharging";
+  WSContentSend_PD(PSTR("{s}Battery{m}<span style='color:%s'>%s</span>{e}"),
                    batt_color, batt_txt);
-  WSContentSend_PD(PSTR("{s}Action{m}%s{e}"), yc01_action_msg.c_str());
+  WSContentSend_PD(PSTR("{s}Add{m}%s{e}"), yc01_action_msg.c_str());
   if (yc01_notes_msg.length() > 0) {
     WSContentSend_PD(PSTR("{s}Notes{m}%s{e}"), yc01_notes_msg.c_str());
   }
@@ -614,6 +651,19 @@ static void YC01WebSensor(void) {
     char heat_txt[32];
     snprintf(heat_txt, sizeof(heat_txt), "Heater (relay %d): %s%s", yc01_heater_relay, yc01_heater_state ? "ON" : "OFF", yc01_heater_auto ? " [auto]" : "");
     WSContentSend_PD(PSTR("{s}%s{m}%s{e}"), yc01_heater_auto ? "Heater auto" : "Heater", heat_txt);
+  }
+}
+
+static void yc01_fmt_dose(float ml, char *out, size_t out_len) {
+  if (ml >= 1000.0f) {
+    float liters = ml / 1000.0f;
+    if (liters == (int)liters) dtostrfd(liters, 0, out);
+    else dtostrfd(liters, 2, out);
+    strcat(out, "L");
+  } else {
+    if (ml == (int)ml) dtostrfd(ml, 0, out);
+    else dtostrfd(ml, 1, out);
+    strcat(out, "ml");
   }
 }
 
@@ -630,24 +680,34 @@ static void yc01_calc_action(void) {
   float ph_diff_hi = r.ph - ph_hi;
   float ph_diff_lo = ph_lo - r.ph;
   String issues = "";
-  if (ph_diff_hi > 1.0f) issues += "pH HIGH: add pH down (phosphoric acid)";
-  else if (ph_diff_hi > 0.3f) issues += "pH high: +1ml pH down/10L";
-  else if (ph_diff_lo > 1.0f) issues += "pH LOW: add KOH solution";
-  else if (ph_diff_lo > 0.3f) issues += "pH low: +1ml pH up/10L";
-  if ((float)r.ec > ec_hi * 1.2f) { if (issues.length()) issues += "<br>"; issues += "EC HIGH: add water"; }
-  else if ((float)r.ec < ec_lo * 0.6f) { if (issues.length()) issues += "<br>"; issues += "EC LOW: +A+B (sep!)"; }
-  else if ((float)r.ec < ec_lo * 0.85f) { if (issues.length()) issues += "<br>"; issues += "EC low: +A+B (sep!)"; }
-  if (r.temp > 24.0f) { if (issues.length()) issues += "<br>"; issues += "HOT! root rot risk"; }
-  else if (r.temp < 16.0f) { if (issues.length()) issues += "<br>"; issues += "COLD! heat to 18C"; }
-  else if (r.temp > yc01_ranges.fmax[5] + 3.0f) { if (issues.length()) issues += "<br>"; issues += "temp high"; }
-  else if (r.temp < yc01_ranges.fmin[5] - 3.0f) { if (issues.length()) issues += "<br>"; issues += "temp low"; }
+  float vol = yc01_volume_l > 0 ? yc01_volume_l : 20.0f;
+  char vol_str[16];
+  dtostrfd(vol, 0, vol_str);
+  if (ph_diff_hi > 0.3f) { float ml = ph_diff_hi * yc01_volume_l * yc01_kh * 0.15f * yc01_ph_cal; char buf[16]; yc01_fmt_dose(ml, buf, sizeof(buf)); issues += buf; issues += " vinegar"; }
+  else if (ph_diff_lo > 0.3f) { float ml = ph_diff_lo * yc01_volume_l * yc01_kh * 0.25f * yc01_ph_cal; char buf[16]; yc01_fmt_dose(ml, buf, sizeof(buf)); issues += buf; issues += " NaHCO3"; }
+  float ec_diff = 0;
+  if ((float)r.ec > ec_hi * 1.2f) {
+    float water_L = yc01_volume_l * ((float)r.ec / ec_hi - 1.0f);
+    char buf[16]; dtostrfd(water_L, 1, buf);
+    if (issues.length()) issues += "<br>";
+    issues += buf; issues += "L water";
+  } else if ((float)r.ec < ec_lo * 0.85f) {
+    ec_diff = ec_lo - (float)r.ec;
+    float ml_A = ec_diff * yc01_volume_l * 0.5f * yc01_ec_cal;
+    float ml_B = ec_diff * yc01_volume_l * 0.5f * yc01_ec_cal;
+    char bufA[16], bufB[16];
+    yc01_fmt_dose(ml_A, bufA, sizeof(bufA));
+    yc01_fmt_dose(ml_B, bufB, sizeof(bufB));
+    if (issues.length()) issues += "<br>";
+    issues += bufA; issues += " A, "; issues += bufB; issues += " B";
+  }
   if (issues.length() == 0) {
-    yc01_action_msg = "<span style='color:green'>All OK</span>";
+    yc01_action_msg = "<span style='color:green'>No action needed</span>";
     yc01_notes_msg = "";
   } else {
-    yc01_action_msg = "<span style='color:orange;font-size:smaller'>" + issues + "</span>";
+    yc01_action_msg = "<span style='color:orange'>" + issues + "</span>";
     if (issues.indexOf("A+B") >= 0) {
-      yc01_notes_msg = "<small>NEVER mix A+B! Add A first, then B</small>";
+      yc01_notes_msg = "A \u2192 0.5h \u2192 B";
     } else {
       yc01_notes_msg = "";
     }
@@ -694,34 +754,50 @@ static String yc01_http_get(const char *url) {
   return payload;
 }
 
-static void yc01_geocode_city(const char *city) {
-  char url[128];
-  snprintf(url, sizeof(url), "http://geocoding-api.open-meteo.com/v1/search?name=%s&count=1", city);
+static void yc01_reverse_geocode(float lat, float lon) {
+  char url[160];
+  snprintf(url, sizeof(url), "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=%.4f&longitude=%.4f&localityLanguage=en", lat, lon);
   String json = yc01_http_get(url);
   if (json.length() == 0) return;
+  int city_idx = json.indexOf("\"city\":");
+  if (city_idx < 0) city_idx = json.indexOf("\"locality\":");
+  if (city_idx < 0) return;
+  int start = json.indexOf("\"", city_idx + 8) + 1;
+  int end = json.indexOf("\"", start);
+  if (end <= start) return;
+  yc01_location = json.substring(start, end);
+  AddLog(LOG_LEVEL_INFO, PSTR("YC01: reverse geocoded to '%s'"), yc01_location.c_str());
+}
+
+static void yc01_geocode_city(const char *city) {
+  char url[128];
+  snprintf(url, sizeof(url), "http://geocoding-api.open-meteo.com/v1/search?name=%s&count=1&language=en", city);
+  String json = yc01_http_get(url);
+  if (json.length() == 0) { AddLog(LOG_LEVEL_DEBUG, PSTR("YC01: geocode failed")); return; }
+  if (json.indexOf("\"results\":") < 0) { AddLog(LOG_LEVEL_DEBUG, PSTR("YC01: city not found")); return; }
   int lat_idx = json.indexOf("\"latitude\":");
   int lon_idx = json.indexOf("\"longitude\":");
   if (lat_idx < 0 || lon_idx < 0) return;
-  int lat_start = lat_idx + 11;
-  int lat_end = json.indexOf(",", lat_start);
-  int lon_start = lon_idx + 12;
-  int lon_end = json.indexOf(",", lon_start);
-  yc01_lat = json.substring(lat_start, lat_end).toFloat();
-  yc01_lon = json.substring(lon_start, lon_end).toFloat();
+  float lat = json.substring(lat_idx + 11, json.indexOf(",", lat_idx + 11)).toFloat();
+  float lon = json.substring(lon_idx + 12, json.indexOf(",", lon_idx + 12)).toFloat();
+  if (lat == 0.0f && lon == 0.0f) { AddLog(LOG_LEVEL_DEBUG, PSTR("YC01: invalid coords")); return; }
+  yc01_lat = lat;
+  yc01_lon = lon;
   yc01_calc_sun_times();
+  AddLog(LOG_LEVEL_INFO, PSTR("YC01: location set to %.4f, %.4f (sunrise %d:%02d, sunset %d:%02d)"),
+         yc01_lat, yc01_lon, yc01_sunrise_min/60, yc01_sunrise_min%60, yc01_sunset_min/60, yc01_sunset_min%60);
 }
 
 static void yc01_fetch_weather(void) {
-  if (yc01_lat == 0.0f && yc01_lon == 0.0f) return;
+  if (yc01_lat == 0.0f || yc01_lon == 0.0f) return;
   char url[160];
   snprintf(url, sizeof(url), "http://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current_weather=true", yc01_lat, yc01_lon);
   String json = yc01_http_get(url);
   if (json.length() == 0) return;
   int t_idx = json.indexOf("\"temperature\":");
   if (t_idx < 0) return;
-  int t_start = t_idx + 14;
-  int t_end = json.indexOf(",", t_start);
-  yc01_outside_temp = json.substring(t_start, t_end).toFloat();
+  yc01_outside_temp = json.substring(t_idx + 14, json.indexOf(",", t_idx + 14)).toFloat();
+  AddLog(LOG_LEVEL_DEBUG, PSTR("YC01: outside temp %.1fC"), yc01_outside_temp);
 }
 
 static void yc01_autocontrol(void) {
@@ -801,9 +877,56 @@ static void CmndYC01Heater(void) {
   Response_P(PSTR("{\"YC01\":{\"HeaterRelay\":%d,\"HeaterAuto\":true}}"), val);
 }
 
+static void CmndYC01Cal(void) {
+  if (strlen(XdrvMailbox.data) == 0) {
+    Response_P(PSTR("{\"YC01\":{\"KH\":%.1f,\"PHCal\":%.2f,\"ECCal\":%.2f}}"), yc01_kh, yc01_ph_cal, yc01_ec_cal);
+    return;
+  }
+  char buf[48];
+  strlcpy(buf, XdrvMailbox.data, sizeof(buf));
+  char *sp = strchr(buf, ' ');
+  if (!sp) { ResponseCmndFailed(); return; }
+  *sp = 0;
+  String param = sp + 1;
+  if (buf[0] == 'k' || buf[0] == 'K') { yc01_kh = param.toFloat(); if (yc01_kh < 0) yc01_kh = 0; if (yc01_kh > 15) yc01_kh = 15; Response_P(PSTR("{\"YC01\":{\"KH\":%.1f}}"), yc01_kh); }
+  else if (buf[0] == 'p' || buf[0] == 'P') { yc01_ph_cal = param.toFloat(); if (yc01_ph_cal < 0.1f) yc01_ph_cal = 0.1f; Response_P(PSTR("{\"YC01\":{\"PHCal\":%.2f}}"), yc01_ph_cal); }
+  else if (buf[0] == 'e' || buf[0] == 'E') { yc01_ec_cal = param.toFloat(); if (yc01_ec_cal < 0.1f) yc01_ec_cal = 0.1f; Response_P(PSTR("{\"YC01\":{\"ECCal\":%.2f}}"), yc01_ec_cal); }
+  else { ResponseCmndFailed(); }
+}
+
+static void CmndYC01Water(void) {
+  if (strlen(XdrvMailbox.data) == 0) {
+    const char* names[4] = {"Distilled", "SoftTap", "MediumTap", "HardTap"};
+    Response_P(PSTR("{\"YC01\":{\"Water\":\"%s\",\"KH\":%.1f}}"), names[yc01_water_type], yc01_kh);
+    return;
+  }
+  String s = XdrvMailbox.data;
+  s.toLowerCase();
+  float kh_vals[4] = {0.5f, 3.0f, 6.0f, 10.0f};
+  int val = 1;
+  if (s.startsWith("dis")) val = 0;
+  else if (s.startsWith("soft")) val = 1;
+  else if (s.startsWith("med")) val = 2;
+  else if (s.startsWith("hard")) val = 3;
+  yc01_water_type = val;
+  yc01_kh = kh_vals[val];
+  const char* names[4] = {"Distilled", "SoftTap", "MediumTap", "HardTap"};
+  Response_P(PSTR("{\"YC01\":{\"Water\":\"%s\",\"KH\":%.1f}}"), names[val], yc01_kh);
+}
+
+static void CmndYC01Volume(void) {
+  if (strlen(XdrvMailbox.data) == 0) {
+    Response_P(PSTR("{\"YC01\":{\"Volume\":%.1f}}"), yc01_volume_l);
+    return;
+  }
+  yc01_volume_l = atof(XdrvMailbox.data);
+  if (yc01_volume_l < 1.0f) yc01_volume_l = 20.0f;
+  Response_P(PSTR("{\"YC01\":{\"Volume\":%.1f}}"), yc01_volume_l);
+}
+
 static void CmndYC01LatLon(void) {
   if (strlen(XdrvMailbox.data) == 0) {
-    Response_P(PSTR("{\"YC01\":{\"Lat\":%.4f,\"Lon\":%.4f}}"), yc01_lat, yc01_lon);
+    Response_P(PSTR("{\"YC01\":{\"Lat\":%.4f,\"Lon\":%.4f,\"Location\":\"%s\"}}"), yc01_lat, yc01_lon, yc01_location.c_str());
     return;
   }
   char buf[48];
@@ -814,8 +937,9 @@ static void CmndYC01LatLon(void) {
   yc01_lat = atof(buf);
   yc01_lon = atof(sp + 1);
   yc01_calc_sun_times();
-  Response_P(PSTR("{\"YC01\":{\"Lat\":%.4f,\"Lon\":%.4f,\"Sunrise\":%d,\"Sunset\":%d}}"),
-             yc01_lat, yc01_lon, yc01_sunrise_min, yc01_sunset_min);
+  if (yc01_location.length() == 0) yc01_reverse_geocode(yc01_lat, yc01_lon);
+  Response_P(PSTR("{\"YC01\":{\"Lat\":%.4f,\"Lon\":%.4f,\"Sunrise\":%d,\"Sunset\":%d,\"Location\":\"%s\"}}"),
+             yc01_lat, yc01_lon, yc01_sunrise_min, yc01_sunset_min, yc01_location.c_str());
 }
 
 bool Xdrv89(uint32_t function) {
